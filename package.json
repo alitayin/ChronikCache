@@ -1,0 +1,25 @@
+{
+  "name": "chronik-cache",
+  "version": "1.0.0",
+  "description": "A cache helper for chronik-client",
+  "main": "index.js",
+  "scripts": {
+    "test": "mocha test/**/*.test.js",
+    "start": "node index.js"
+  },
+  "author": "Alita Yin",
+  "license": "ISC",
+  "keywords": [
+    "chronik",
+    "ecash",
+    "cache"
+  ],
+  "dependencies": {
+    "ecashaddrjs": "^2.0.0",
+    "level": "^9.0.0"
+  },
+  "devDependencies": {
+    "chronik-client": "^2.1.1",
+    "mocha": "^11.1.0"
+  }
+}

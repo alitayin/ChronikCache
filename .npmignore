@@ -1,0 +1,47 @@
+# 开发和测试相关
+test/
+tests/
+coverage/
+.nyc_output/
+*.test.js
+*.spec.js
+
+# IDE 和编辑器
+.idea/
+.vscode/
+*.sublime-*
+.DS_Store
+
+# 缓存和临时文件
+.cache/
+.tmp/
+tmp/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 源代码控制
+.git/
+.gitignore
+.github/
+
+# 配置文件
+.eslintrc*
+.prettierrc*
+.editorconfig
+.babelrc
+tsconfig.json
+jest.config.js
+
+# 开发依赖
+node_modules/
+
+# 文档和示例
+docs/
+examples/
+demo/
+
+# 其他
+*.tgz
+.env* 
