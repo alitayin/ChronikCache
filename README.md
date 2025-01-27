@@ -1,4 +1,3 @@
-```markdown
 # ChronikCache V0.1
 
 ChronikCache is an npm package that provides a caching layer for Chronik.
@@ -46,33 +45,26 @@ const chronikCache = new ChronikCache(chronik, {
 
 ## Methods
 
-### Address Handling
+### Address & Script Handling
 
-ChronikCache provides a fluent interface for addresses:
+ChronikCache provides fluent interfaces for both addresses and scripts:
 
-```js
-chronikCache.address(address).history(pageOffset, pageSize);
+```javascript
+// Get transaction history for an address
+const addressHistory = await chronikCache.address(address).history(pageOffset, pageSize);
+
+// Get transaction history for a script
+const scriptHistory = await chronikCache.script(type, hash).history(pageOffset, pageSize);
+
+// Both methods return: { txs: [...], numPages: number, numTxs: number }
 ```
-
----
-
-### Script Handling
-
-ChronikCache can also handle scripts by converting them to eCash addresses under the hood:
-
-```js
-chronikCache.script(type, hash).history(pageOffset, pageSize);
-```
-
-- `type`: The script type (e.g., `p2pkh`).  
-- `hash`: The script's hash.  
 
 ---
 
 ### Cache Management
 
 1. **clearAddressCache(address)**  
-   Clears the local cache for a given address and unsubscribes the address’s WebSocket connection.  
+   Clears the local cache for a given address and unsubscribes the address's WebSocket connection.  
    ```js
    await chronikCache.clearAddressCache('ecash:qq...');
    ```
@@ -88,19 +80,4 @@ chronikCache.script(type, hash).history(pageOffset, pageSize);
 
 ---
 
-### WebSocket Management
-
-The package automatically manages WebSocket connections via the `WebSocketManager`. When a cache is out-of-date, it’ll fetch new transactions and update, then reopen WebSocket connections to monitor new transactions for that address.
-
----
-
-### Failover and Retry
-
-ChronikCache uses a `FailoverHandler` to gracefully handle failover scenarios (e.g., Chronik downtime or network errors). You can control the number of retries and delay between retries by passing `failoverOptions` to the constructor.
-
----
-
-## License
-
-ChronikCache is [MIT licensed](./LICENSE). Feel free to use it in your own projects. For issues or feature requests, please open an issue in our GitHub repository. 优化下我的md格式，内容不要变
-```
+ [MIT licensed](./LICENSE).
