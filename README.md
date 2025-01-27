@@ -1,6 +1,9 @@
+```markdown
 # ChronikCache V0.1
 
-ChronikCache is an npm package that provides a caching layer for Chronik
+ChronikCache is an npm package that provides a caching layer for Chronik.
+
+---
 
 ## Features
 
@@ -11,11 +14,15 @@ ChronikCache is an npm package that provides a caching layer for Chronik
 - Script-to-address conversion (using [ecashaddrjs](https://www.npmjs.com/package/ecashaddrjs)).  
 - Simple, fluent interface for fetching transaction history.  
 
+---
+
 ## Installation
 
 ```bash
 npm install chronikcache
 ```
+
+---
 
 ## Usage
 
@@ -33,6 +40,9 @@ const chronikCache = new ChronikCache(chronik, {
     retryDelayMs: 1500
   }
 });
+```
+
+---
 
 ## Methods
 
@@ -44,6 +54,7 @@ ChronikCache provides a fluent interface for addresses:
 chronikCache.address(address).history(pageOffset, pageSize);
 ```
 
+---
 
 ### Script Handling
 
@@ -56,6 +67,7 @@ chronikCache.script(type, hash).history(pageOffset, pageSize);
 - `type`: The script type (e.g., `p2pkh`).  
 - `hash`: The script's hash.  
 
+---
 
 ### Cache Management
 
@@ -74,14 +86,21 @@ chronikCache.script(type, hash).history(pageOffset, pageSize);
 3. **_getCacheStatus(address)**  
    Retrieves the internal cache status of an address (e.g., **`UNKNOWN`**, **`UPDATING`**, **`LATEST`**).  
 
+---
+
 ### WebSocket Management
 
 The package automatically manages WebSocket connections via the `WebSocketManager`. When a cache is out-of-date, it’ll fetch new transactions and update, then reopen WebSocket connections to monitor new transactions for that address.
+
+---
 
 ### Failover and Retry
 
 ChronikCache uses a `FailoverHandler` to gracefully handle failover scenarios (e.g., Chronik downtime or network errors). You can control the number of retries and delay between retries by passing `failoverOptions` to the constructor.
 
+---
+
 ## License
 
-ChronikCache is [MIT licensed](./LICENSE). Feel free to use it in your own projects. For issues or feature requests, please open an issue in our GitHub repository.
+ChronikCache is [MIT licensed](./LICENSE). Feel free to use it in your own projects. For issues or feature requests, please open an issue in our GitHub repository. 优化下我的md格式，内容不要变
+```
