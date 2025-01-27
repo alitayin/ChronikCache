@@ -34,13 +34,6 @@ const chronikCache = new ChronikCache(chronik, {
   }
 });
 
-// Example usage: Fetching address transaction history
-(async () => {
-  const address = 'ecash:qq...'; // eCash address
-  const result = await chronikCache.address(address).history(0, 200);
-  console.log('Transaction History:', result.txs);
-})();
-```
 ## Methods
 
 ### Address Handling
@@ -85,22 +78,6 @@ chronikCache.script(type, hash).history(pageOffset, pageSize);
 3. **_getCacheStatus(address)**  
    Retrieves the internal cache status of an address (e.g., **`UNKNOWN`**, **`UPDATING`**, **`LATEST`**).  
 
-### WebSocket Management
-
-The package automatically manages WebSocket connections via the `WebSocketManager`. When a cache is out-of-date, it’ll fetch new transactions and update, then reopen WebSocket connections to monitor new transactions for that address.
-
-### Failover and Retry
-
-ChronikCache uses a `FailoverHandler` to gracefully handle failover scenarios (e.g., Chronik downtime or network errors). You can control the number of retries and delay between retries by passing `failoverOptions` to the constructor.
-
-Example:
-```js
-const chronikCache = new ChronikCache(chronik, {
-  failoverOptions: {
-    retryAttempts: 5,
-    retryDelayMs: 2000
-  }
-});
 ```
 ## License
 

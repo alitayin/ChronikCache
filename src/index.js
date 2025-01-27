@@ -1,5 +1,6 @@
 const DbUtils = require('./lib/dbUtils');
 const WebSocketManager = require('./lib/WebSocketManager');
+const Logger = require('./lib/Logger');
 const { encodeCashAddress } = require('ecashaddrjs');
 const { CACHE_STATUS, DEFAULT_CONFIG } = require('./constants');
 const FailoverHandler = require('./lib/failover');
@@ -8,23 +9,28 @@ class ChronikCache {
     constructor(chronik, {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
-        failoverOptions = {}
+        failoverOptions = {},
+        enableLogging = true
     } = {}) {
         this.chronik = chronik;
         this.maxMemory = maxMemory;  
         this.defaultPageSize = DEFAULT_CONFIG.DEFAULT_PAGE_SIZE;
         this.cacheDir = DEFAULT_CONFIG.CACHE_DIR;
         this.maxCacheSize = maxCacheSize * 1024 * 1024;  
+        this.enableLogging = enableLogging;
+
+        this.logger = new Logger(enableLogging);
 
         // Initialize database utilities
         this.db = new DbUtils(this.cacheDir, {
             valueEncoding: 'json',
-            maxCacheSize: this.maxCacheSize
+            maxCacheSize: this.maxCacheSize,
+            enableLogging
         });
 
         this.txCache = new Map();
         this.statusMap = new Map();
-        this.wsManager = new WebSocketManager(chronik);
+        this.wsManager = new WebSocketManager(chronik, failoverOptions, enableLogging);
         this.updateLocks = new Map();
 
         // Add script type to address cache mapping
@@ -33,7 +39,6 @@ class ChronikCache {
         // Add failover handler
         this.failover = new FailoverHandler(failoverOptions);
     }
-
 
     // Read cache from database
     async _readCache(address) {
@@ -75,15 +80,15 @@ class ChronikCache {
         // Check cache size and clean if necessary
         const currentSize = await this.db.calculateCacheSize();
         if (currentSize > this.maxCacheSize) {
-            console.log('Cache size exceeded limit, cleaning least accessed entries...');
+            this.logger.log('Cache size exceeded limit, cleaning least accessed entries...');
             await this.db.cleanLeastAccessedCache();
         }
 
         await this.db.put(address, cacheData);
-        console.log(`Cache written for ${address}`);
+        this.logger.log(`Cache written for ${address}`);
     }
 
-    /* --------------------- 初始化 WebSocket --------------------- */
+  /* --------------------- Initialize WebSocket --------------------- */
 
     async _initWebsocketForAddress(address) {
         // Use failover's handleWebSocketOperation to handle WebSocket initialization
@@ -99,7 +104,7 @@ class ChronikCache {
         }, address, 'WebSocket initialization');
     }
 
-    /* --------------------- 缓存状态管理方法 --------------------- */
+    /* --------------------- Cache State Management Methods --------------------- */
 
     _getCacheStatus(address) {
         if (this._isUpdating(address)) {
@@ -131,13 +136,13 @@ class ChronikCache {
 
     _checkAndUpdateCache(address, apiNumTxs, pageSize) {
         if (apiNumTxs > this.maxMemory) {
-            console.log(`[${address}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
+            this.logger.log(`[${address}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
             return;
         }
 
         if (this._isUpdating(address)) {
-            console.log(`[${address}] Cache update already in progress, skipping`);
+            this.logger.log(`[${address}] Cache update already in progress, skipping`);
             return;
         }
 
@@ -147,19 +152,19 @@ class ChronikCache {
                 if (!cachedData || cachedData.numTxs !== apiNumTxs) {
                     this.updateLocks.set(address, true);
                     try {
-                        console.log(`[${address}] Cache needs update, changing status to UPDATING`);
+                        this.logger.log(`[${address}] Cache needs update, changing status to UPDATING`);
                         await this._updateCache(address, apiNumTxs, pageSize);
                     } finally {
                         this.updateLocks.delete(address);
                     }
                 } else {
-                    console.log(`[${address}] Cache is up to date, setting status to LATEST`);
+                    this.logger.log(`[${address}] Cache is up to date, setting status to LATEST`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
                     await this._initWebsocketForAddress(address);
                 }
             } catch (error) {
-                console.error('Cache update error:', error);
-                console.log(`[${address}] Error occurred, setting status to UNKNOWN`);
+                this.logger.error('Cache update error:', error);
+                this.logger.log(`[${address}] Error occurred, setting status to UNKNOWN`);
                 this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
             }
         });
@@ -169,12 +174,12 @@ class ChronikCache {
         return await this.failover.executeWithRetry(async () => {
             try {
                 if (totalNumTxs > this.maxMemory) {
-                    console.log(`[${address}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update`);
+                    this.logger.log(`[${address}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update`);
                     this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
                     return;
                 }
 
-                console.log(`[${address}] Starting cache update`);
+                this.logger.log(`[${address}] Starting cache update`);
                 let currentPage = 0;
 
                 while (true) {
@@ -183,10 +188,10 @@ class ChronikCache {
                     const txMap = new Map(Object.entries(existingCache?.txMap || {}));
                     const currentSize = txMap.size;
 
-                    console.log(`Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
+                    this.logger.log(`Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
                     
                     if (currentSize >= totalNumTxs) {
-                        console.log(`Cache update completed, final size: ${currentSize}`);
+                        this.logger.log(`Cache update completed, final size: ${currentSize}`);
                         break;
                     }
 
@@ -214,16 +219,15 @@ class ChronikCache {
                 // Check if cache status needs to be set to LATEST after update completion
                 const currentStatus = this._getCacheStatus(address);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
-                    console.log(`[${address}] Cache update complete, setting status to LATEST`);
+                    this.logger.log(`[${address}] Cache update complete, setting status to LATEST`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
 
-                    // Call initWebsocketForAddress here to ensure [WS] Connected... output
                     await this._initWebsocketForAddress(address);
                 } else {
-                    console.log(`[${address}] Cache update complete, maintaining LATEST status`);
+                    this.logger.log(`[${address}] Cache update complete, maintaining LATEST status`);
                 }
             } catch (error) {
-                console.error('[Cache] Error in _updateCache:', error);
+                this.logger.error('[Cache] Error in _updateCache:', error);
                 throw error;
             }
         }, `updateCache for ${address}`);
@@ -243,7 +247,7 @@ class ChronikCache {
             this.scriptToAddressMap.set(scriptKey, address);
             return address;
         } catch (error) {
-            console.error('Error converting script to address:', error);
+            this.logger.error('Error converting script to address:', error);
             throw error;
         }
     }
@@ -269,6 +273,7 @@ class ChronikCache {
         this.wsManager.unsubscribeAddress(address);
         // Update status to UNKNOWN after clearing cache
         this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
+        this.logger.log(`Cache cleared for address: ${address}`);
     }
 
     async clearAllCache() {
@@ -282,8 +287,9 @@ class ChronikCache {
             this.statusMap.forEach((_, addr) => {
                 this._setCacheStatus(addr, CACHE_STATUS.UNKNOWN);
             });
+            this.logger.log('All cache cleared successfully');
         } catch (error) {
-            console.error('Error clearing all cache:', error);
+            this.logger.error('Error clearing all cache:', error);
         }
     }
 
@@ -291,21 +297,19 @@ class ChronikCache {
         return await this.failover.executeWithRetry(async () => {
             try {
                 const apiPageSize = Math.min(200, pageSize);
-                const cachePageSize = Math.min(4000, pageSize);
+                const cachePageSize = Math.min(200, pageSize);
 
                 const currentStatus = this._getCacheStatus(address);
                 const cachedData = await this._readCache(address);
                 const cachedCount = cachedData ? cachedData.numTxs : 0;
 
-                console.log(`[${address}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
+                this.logger.log(`[${address}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
                 
-                // Use new method to get remaining time
                 const wsTimeInfo = this.wsManager.getRemainingTime(address);
                 if (wsTimeInfo.active) {
-                    console.log(`[${address}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                    this.logger.log(`[${address}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
                 } else {
-                    console.log(`[${address}] ${wsTimeInfo.message}`);
-                    // If WebSocket is inactive and cache status is LATEST, reinitialize WebSocket
+                    this.logger.log(`[${address}] ${wsTimeInfo.message}`);
                     if (currentStatus === CACHE_STATUS.LATEST) {
                         await this._initWebsocketForAddress(address);
                     }
@@ -317,7 +321,7 @@ class ChronikCache {
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
                     const apiResult = await this.chronik.address(address).history(pageOffset, apiPageSize);
-                    console.log(`[${address}] API txs count: ${apiResult.numTxs}`);
+                    this.logger.log(`[${address}] API txs count: ${apiResult.numTxs}`);
                     if (currentStatus !== CACHE_STATUS.UPDATING) {
                         this._checkAndUpdateCache(address, apiResult.numTxs, this.defaultPageSize);
                     }
@@ -329,10 +333,10 @@ class ChronikCache {
                     return cachedResult;
                 }
                 const apiFallback = await this.chronik.address(address).history(pageOffset, apiPageSize);
-                console.log(`[${address}] API txs count (fallback): ${apiFallback.numTxs}`);
+                this.logger.log(`[${address}] API txs count (fallback): ${apiFallback.numTxs}`);
                 return apiFallback;
             } catch (error) {
-                console.error('[Cache] Error in getAddressHistory:', error);
+                this.logger.error('[Cache] Error in getAddressHistory:', error);
                 throw error;
             }
         }, `getAddressHistory for ${address}`);
@@ -345,7 +349,7 @@ class ChronikCache {
             let hasMorePages = true;
 
             while (hasMorePages) {
-                console.log(`Fetching page ${currentPage}...`);
+                this.logger.log(`Fetching page ${currentPage}...`);
                 const result = await this.chronik.address(address).history(currentPage, this.defaultPageSize);
                 allTxs = allTxs.concat(result.txs);
                 hasMorePages = currentPage + 1 < result.numPages;
@@ -358,7 +362,7 @@ class ChronikCache {
                 numTxs: allTxs.length
             };
         } catch (error) {
-            console.error('Error fetching all history:', error);
+            this.logger.error('Error fetching all history:', error);
             throw error;
         }
     }
