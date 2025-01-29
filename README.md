@@ -18,7 +18,7 @@ ChronikCache is an npm package that provides a caching layer for Chronik.
 ## Installation
 
 ```bash
-npm install chronikcache
+npm install chronik-cache
 ```
 
 ---
