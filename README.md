@@ -30,7 +30,7 @@ Below is a basic example of how you can use ChronikCache in your Node.js applica
 
 ```js
 const Chronik = require('chronik-client'); // Hypothetical Chronik client
-const ChronikCache = require('chronikcache');
+const ChronikCache = require('chronik-cache');
 
 const chronikCache = new ChronikCache(chronik, {
   maxMemory: 50000,                     // Maximum number of transactions to cache in memory
@@ -40,7 +40,7 @@ const chronikCache = new ChronikCache(chronik, {
     retryDelayMs: 1500
   },
   wsTimeout: 30000,                     // WebSocket timeout in milliseconds
-  wsExtendTimeout: 60000,               // Extended WebSocket timeout in milliseconds
+  wsExtendTimeout: 60000,              // Extended WebSocket timeout in milliseconds
   enableLogging: true
 });
 ```
