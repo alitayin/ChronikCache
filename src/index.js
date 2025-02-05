@@ -43,6 +43,10 @@ class ChronikCache {
 
         // Add failover handler
         this.failover = new FailoverHandler(failoverOptions);
+
+        // 添加token缓存相关的Map
+        this.tokenStatusMap = new Map();
+        this.tokenUpdateLocks = new Map();
     }
 
     // Read cache from database
@@ -416,6 +420,174 @@ class ChronikCache {
                 return await this.getAddressHistory(address, pageOffset, pageSize);
             }
             // Add other methods here if needed
+        };
+    }
+
+    /* --------------------- Token Related Methods --------------------- */
+
+    _getTokenCacheStatus(tokenId) {
+        if (this._isTokenUpdating(tokenId)) {
+            return CACHE_STATUS.UPDATING;
+        }
+
+        const status = this.tokenStatusMap.get(tokenId);
+        if (!status) {
+            return CACHE_STATUS.UNKNOWN;
+        }
+
+        return status.status;
+    }
+
+    _setTokenCacheStatus(tokenId, status) {
+        const now = Date.now();
+        const existingStatus = this.tokenStatusMap.get(tokenId) || {};
+        this.tokenStatusMap.set(tokenId, {
+            status,
+            cacheTimestamp: existingStatus.cacheTimestamp || now
+        });
+    }
+
+    _isTokenUpdating(tokenId) {
+        return this.tokenUpdateLocks.has(tokenId);
+    }
+
+    async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize) {
+        if (apiNumTxs > this.maxMemory) {
+            this.logger.log(`[Token ${tokenId}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
+            this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
+            return;
+        }
+
+        if (this._isTokenUpdating(tokenId)) {
+            this.logger.log(`[Token ${tokenId}] Cache update already in progress, skipping`);
+            return;
+        }
+
+        Promise.resolve().then(async () => {
+            try {
+                const cachedData = await this._readCache(tokenId);
+                if (!cachedData || cachedData.numTxs !== apiNumTxs) {
+                    this.tokenUpdateLocks.set(tokenId, true);
+                    try {
+                        this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING`);
+                        await this._updateTokenCache(tokenId, apiNumTxs, pageSize);
+                    } finally {
+                        this.tokenUpdateLocks.delete(tokenId);
+                    }
+                } else {
+                    this.logger.log(`[Token ${tokenId}] Cache is up to date, setting status to LATEST`);
+                    this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
+                }
+            } catch (error) {
+                this.logger.error('Token cache update error:', error);
+                this.logger.log(`[Token ${tokenId}] Error occurred, setting status to UNKNOWN`);
+                this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
+            }
+        });
+    }
+
+    async _updateTokenCache(tokenId, totalNumTxs, pageSize) {
+        return await this.failover.executeWithRetry(async () => {
+            try {
+                if (totalNumTxs > this.maxMemory) {
+                    this.logger.log(`[${tokenId}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update`);
+                    this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
+                    return;
+                }
+
+                this.logger.log(`[${tokenId}] Starting cache update`);
+                let currentPage = 0;
+
+                while (true) {
+                    // Reload cache on each iteration to get actual transaction count
+                    const existingCache = await this._readCache(tokenId);
+                    const txMap = new Map(Object.entries(existingCache?.txMap || {}));
+                    const currentSize = txMap.size;
+
+                    this.logger.log(`Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
+                    
+                    if (currentSize >= totalNumTxs) {
+                        this.logger.log(`Cache update completed, final size: ${currentSize}`);
+                        break;
+                    }
+
+                    const result = await this.chronik.tokenId(tokenId).history(currentPage, pageSize);
+
+                    result.txs.forEach(tx => {
+                        if (!txMap.has(tx.txid)) {
+                            txMap.set(tx.txid, tx);
+                        }
+                    });
+
+                    const updatedData = {
+                        txMap: Object.fromEntries(txMap),
+                        txOrder: Array.from(txMap.keys()),
+                        numPages: Math.ceil(txMap.size / pageSize),
+                        numTxs: txMap.size
+                    };
+                    await this._writeCache(tokenId, updatedData);
+
+                    currentPage++;
+                }
+
+                this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
+            } catch (error) {
+                this.logger.error('[Cache] Error in _updateTokenCache:', error);
+                throw error;
+            }
+        }, `updateTokenCache for ${tokenId}`);
+    }
+
+    async getTokenHistory(tokenId, pageOffset = 0, pageSize = 200) {
+        return await this.failover.executeWithRetry(async () => {
+            try {
+                const apiPageSize = Math.min(200, pageSize);
+                const cachePageSize = Math.min(4000, pageSize);
+
+                const currentStatus = this._getTokenCacheStatus(tokenId);
+                const cachedData = await this._readCache(tokenId);
+                const cachedCount = cachedData ? cachedData.numTxs : 0;
+
+                this.logger.log(`[Token ${tokenId}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
+
+                if (currentStatus !== CACHE_STATUS.LATEST) {
+                    const apiResult = await this.chronik.tokenId(tokenId).history(pageOffset, apiPageSize);
+                    this.logger.log(`[Token ${tokenId}] API txs count: ${apiResult.numTxs}`);
+                    if (currentStatus !== CACHE_STATUS.UPDATING) {
+                        this._checkAndUpdateTokenCache(tokenId, apiResult.numTxs, this.defaultPageSize);
+                    }
+
+                    if (pageSize > 200) {
+                        return {
+                            message: "Cache is being prepared. Please wait for cache to be ready when requesting more than 200 transactions.",
+                            numTxs: 0,
+                            txs: [],
+                            numPages: 0
+                        };
+                    }
+                    
+                    return apiResult;
+                }
+
+                const cachedResult = await this._getPageFromCache(tokenId, pageOffset, cachePageSize);
+                if (cachedResult) {
+                    return cachedResult;
+                }
+                const apiFallback = await this.chronik.tokenId(tokenId).history(pageOffset, apiPageSize);
+                this.logger.log(`[Token ${tokenId}] API txs count (fallback): ${apiFallback.numTxs}`);
+                return apiFallback;
+            } catch (error) {
+                this.logger.error('[Cache] Error in getTokenHistory:', error);
+                throw error;
+            }
+        }, `getTokenHistory for ${tokenId}`);
+    }
+
+    tokenId(tokenId) {
+        return {
+            history: async (pageOffset = 0, pageSize = 200) => {
+                return await this.getTokenHistory(tokenId, pageOffset, pageSize);
+            }
         };
     }
 }

@@ -1,4 +1,4 @@
-# ChronikCache V0.2
+# ChronikCache V0.3.1
 
 ChronikCache is an npm package that provides a caching layer for Chronik.
 
@@ -12,6 +12,7 @@ ChronikCache is an npm package that provides a caching layer for Chronik.
 - Flexible configuration for cache size, memory limit, page sizing, and WebSocket timeouts.  
 - Script-to-address conversion (using [ecashaddrjs](https://www.npmjs.com/package/ecashaddrjs)).  
 - Simple, fluent interface for fetching transaction history.  
+- Token transaction history caching support.
 
 ---
 
@@ -50,7 +51,7 @@ const chronikCache = new ChronikCache(chronik, {
 
 ### Address & Script Handling
 
-ChronikCache provides fluent interfaces for both addresses and scripts:
+ChronikCache provides fluent interfaces for addresses, scripts and tokens:
 
 ```javascript
 // Retrieve transaction history for an address
@@ -59,7 +60,10 @@ const addressHistory = await chronikCache.address(address).history(pageOffset, p
 // Retrieve transaction history for a script
 const scriptHistory = await chronikCache.script(type, hash).history(pageOffset, pageSize);
 
-// Both methods return: { txs: [...], numPages: number, numTxs: number }
+// Retrieve transaction history for a token
+const tokenHistory = await chronikCache.tokenId(tokenId).history(pageOffset, pageSize);
+
+// All methods return: { txs: [...], numPages: number, numTxs: number }
 ```
 
 ---
