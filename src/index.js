@@ -10,7 +10,9 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = true
+        enableLogging = true,
+        wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
+        wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
         this.chronik = chronik;
         this.maxMemory = maxMemory;  
@@ -30,7 +32,10 @@ class ChronikCache {
 
         this.txCache = new Map();
         this.statusMap = new Map();
-        this.wsManager = new WebSocketManager(chronik, failoverOptions, enableLogging);
+        this.wsManager = new WebSocketManager(chronik, failoverOptions, enableLogging, {
+            wsTimeout,
+            wsExtendTimeout
+        });
         this.updateLocks = new Map();
 
         // Add script type to address cache mapping
@@ -88,7 +93,7 @@ class ChronikCache {
         this.logger.log(`Cache written for ${address}`);
     }
 
-  /* --------------------- Initialize WebSocket --------------------- */
+    /* --------------------- 初始化 WebSocket --------------------- */
 
     async _initWebsocketForAddress(address) {
         // Use failover's handleWebSocketOperation to handle WebSocket initialization
@@ -104,7 +109,7 @@ class ChronikCache {
         }, address, 'WebSocket initialization');
     }
 
-    /* --------------------- Cache State Management Methods --------------------- */
+    /* --------------------- 缓存状态管理方法 --------------------- */
 
     _getCacheStatus(address) {
         if (this._isUpdating(address)) {
@@ -297,7 +302,7 @@ class ChronikCache {
         return await this.failover.executeWithRetry(async () => {
             try {
                 const apiPageSize = Math.min(200, pageSize);
-                const cachePageSize = Math.min(200, pageSize);
+                const cachePageSize = Math.min(4000, pageSize);
 
                 const currentStatus = this._getCacheStatus(address);
                 const cachedData = await this._readCache(address);
@@ -320,11 +325,23 @@ class ChronikCache {
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
+                    // 使用传入的 pageOffset
                     const apiResult = await this.chronik.address(address).history(pageOffset, apiPageSize);
                     this.logger.log(`[${address}] API txs count: ${apiResult.numTxs}`);
                     if (currentStatus !== CACHE_STATUS.UPDATING) {
                         this._checkAndUpdateCache(address, apiResult.numTxs, this.defaultPageSize);
                     }
+
+                    // 如果请求的 pageSize 大于 200，返回提示信息
+                    if (pageSize > 200) {
+                        return {
+                            message: "Cache is being prepared. Please wait for cache to be ready when requesting more than 200 transactions.",
+                            numTxs: 0,
+                            txs: [],
+                            numPages: 0
+                        };
+                    }
+                    
                     return apiResult;
                 }
 

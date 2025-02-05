@@ -1,14 +1,20 @@
 const FailoverHandler = require('./failover');
 const Logger = require('./Logger');
+const { DEFAULT_CONFIG } = require('../constants');
 
 class WebSocketManager {
-    constructor(chronik, failoverOptions = {}, enableLogging = false) {
+    constructor(chronik, failoverOptions = {}, enableLogging = false, {
+        wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
+        wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
+    } = {}) {
         this.chronik = chronik;
         this.wsSubscriptions = new Map();
         this.wsTimeouts = new Map();
         this.wsTimeoutExpirations = new Map();
         this.failover = new FailoverHandler(failoverOptions);
         this.logger = new Logger(enableLogging);
+        this.wsTimeout = wsTimeout;
+        this.wsExtendTimeout = wsExtendTimeout;
     }
 
     async initWebsocketForAddress(address, onNewTransaction) {
@@ -86,10 +92,10 @@ class WebSocketManager {
         let newExpirationTime;
         if (existingTimeout) {
             const currentExpiration = this.wsTimeoutExpirations.get(address);
-            newExpirationTime = currentExpiration + 120000;
+            newExpirationTime = currentExpiration + this.wsExtendTimeout;
             clearTimeout(existingTimeout);
         } else {
-            newExpirationTime = currentTime + 120000;
+            newExpirationTime = currentTime + this.wsTimeout;
         }
 
         this.wsTimeoutExpirations.set(address, newExpirationTime);

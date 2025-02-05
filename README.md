@@ -1,4 +1,4 @@
-# ChronikCache V0.1
+# ChronikCache V0.2
 
 ChronikCache is an npm package that provides a caching layer for Chronik.
 
@@ -8,8 +8,8 @@ ChronikCache is an npm package that provides a caching layer for Chronik.
 
 - Local LevelDB-based caching of transaction histories.  
 - Automatic cache updates when Chronik indicates new transactions.  
-- WebSocket management and caching failover/retry logic.  
-- Flexible configuration for cache size, memory limit, and page sizing.  
+- WebSocket management with configurable timeout settings and caching failover/retry logic.  
+- Flexible configuration for cache size, memory limit, page sizing, and WebSocket timeouts.  
 - Script-to-address conversion (using [ecashaddrjs](https://www.npmjs.com/package/ecashaddrjs)).  
 - Simple, fluent interface for fetching transaction history.  
 
@@ -32,12 +32,15 @@ const Chronik = require('chronik-client'); // Hypothetical Chronik client
 const ChronikCache = require('chronikcache');
 
 const chronikCache = new ChronikCache(chronik, {
-  maxMemory: 50000,                     // Max transaction count to cache in memory
-  maxCacheSize: 100,                    // Max disk size in MB for the local cache
-  failoverOptions: {                    // Options passed to the internal FailoverHandler
+  maxMemory: 50000,                     // Maximum number of transactions to cache in memory
+  maxCacheSize: 100,                    // Maximum disk size in MB for the local cache
+  failoverOptions: {                    // Options for the internal FailoverHandler
     retryAttempts: 3,
     retryDelayMs: 1500
-  }
+  },
+  wsTimeout: 30000,                     // WebSocket timeout in milliseconds
+  wsExtendTimeout: 60000,               // Extended WebSocket timeout in milliseconds
+  enableLogging: true
 });
 ```
 
@@ -50,10 +53,10 @@ const chronikCache = new ChronikCache(chronik, {
 ChronikCache provides fluent interfaces for both addresses and scripts:
 
 ```javascript
-// Get transaction history for an address
+// Retrieve transaction history for an address
 const addressHistory = await chronikCache.address(address).history(pageOffset, pageSize);
 
-// Get transaction history for a script
+// Retrieve transaction history for a script
 const scriptHistory = await chronikCache.script(type, hash).history(pageOffset, pageSize);
 
 // Both methods return: { txs: [...], numPages: number, numTxs: number }

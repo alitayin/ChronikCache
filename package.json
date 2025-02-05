@@ -2,7 +2,7 @@
   "name": "chronik-cache",
   "version": "1.0.0",
   "description": "A cache helper for chronik-client",
-  "main": "index.js",
+  "main": "src/index.js",
   "scripts": {
     "test": "mocha test/**/*.test.js",
     "start": "node index.js"
@@ -21,5 +21,13 @@
   "devDependencies": {
     "chronik-client": "^2.1.1",
     "mocha": "^11.1.0"
-  }
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "types": "./src/index.d.ts"
 }
