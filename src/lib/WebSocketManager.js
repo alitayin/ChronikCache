@@ -66,6 +66,56 @@ class WebSocketManager {
         );
     }
 
+    async initWebsocketForToken(tokenId, onNewTransaction) {
+        return await this.failover.handleWebSocketOperation(
+            async () => {
+                if (this.wsSubscriptions.has(tokenId)) {
+                    this.logger.log(`[WS] Token ${tokenId} is already subscribed.`);
+                    this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                    return;
+                }
+
+                const ws = this.chronik.ws({
+                    onMessage: async (msg) => {
+                        this.logger.log('[WS] Received message:', msg);
+                        if (msg.type === 'Tx' && msg.msgType === 'TX_ADDED_TO_MEMPOOL') {
+                            this.logger.log(`[WS] New transaction for Token ${tokenId}`);
+                            try {
+                                await onNewTransaction(tokenId);
+                            } catch (error) {
+                                this.logger.error('[WS] Failed to update token cache after new transaction:', error);
+                            }
+                        }
+                    },
+                    onConnect: () => {
+                        this.logger.log(`[WS] Connected for Token ${tokenId}`);
+                        ws.subscribeToTokenId(tokenId);
+                    },
+                    onReconnect: () => {
+                        this.logger.log(`[WS] Reconnected for Token ${tokenId}`);
+                        ws.subscribeToTokenId(tokenId);
+                    },
+                    onError: (error) => {
+                        this.logger.error(`[WS] Error for Token ${tokenId}:`, error);
+                    },
+                    onEnd: () => {
+                        this.logger.log(`[WS] Connection ended for Token ${tokenId}`);
+                        this.wsSubscriptions.delete(tokenId);
+                        this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                    }
+                });
+
+                await ws.waitForOpen();
+                ws.subscribeToTokenId(tokenId);
+                this.wsSubscriptions.set(tokenId, ws);
+                this.logger.log(`[WS] Successfully subscribed to Token ${tokenId}`);
+                this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+            },
+            tokenId,
+            'WebSocket initialization'
+        );
+    }
+
     unsubscribeAddress(address) {
         const ws = this.wsSubscriptions.get(address);
         if (ws) {
