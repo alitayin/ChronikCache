@@ -10,7 +10,7 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = true,
+        enableLogging = false,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -107,10 +107,22 @@ class ChronikCache {
             });
 
             await this.wsManager.initWebsocketForAddress(address, async (addr) => {
-                const result = await this.chronik.address(addr).history(0, 1);
-                await this._updateCache(addr, result.numTxs, this.defaultPageSize);
+                const apiNumTxs = await this._quickGetTxCount(addr, 'address');
+                await this._updateCache(addr, apiNumTxs, this.defaultPageSize);
             });
         }, address, 'WebSocket initialization');
+    }
+
+    async _initWebsocketForToken(tokenId) {
+        return await this.failover.handleWebSocketOperation(async () => {
+            this.wsManager.resetWsTimer(tokenId, (id) => {
+                this._setTokenCacheStatus(id, CACHE_STATUS.UNKNOWN);
+            });
+            await this.wsManager.initWebsocketForToken(tokenId, async (id) => {
+                const apiNumTxs = await this._quickGetTxCount(id, 'token');
+                await this._updateTokenCache(id, apiNumTxs, this.defaultPageSize);
+            });
+        }, tokenId, 'WebSocket initialization');
     }
 
     /* --------------------- 缓存状态管理方法 --------------------- */
@@ -143,7 +155,8 @@ class ChronikCache {
         return this.updateLocks.has(address);
     }
 
-    _checkAndUpdateCache(address, apiNumTxs, pageSize) {
+    async _checkAndUpdateCache(address, apiNumTxs, pageSize) {
+        // If the total transaction count exceeds maxMemory, abort caching
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[${address}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
@@ -158,11 +171,25 @@ class ChronikCache {
         Promise.resolve().then(async () => {
             try {
                 const cachedData = await this._readCache(address);
+                let dynamicPageSize = pageSize; // Default value if no cache exists
+                if (cachedData && typeof cachedData.numTxs === 'number') {
+                    dynamicPageSize = apiNumTxs - cachedData.numTxs;
+                    // Ensure dynamicPageSize is at least 1
+                    if (dynamicPageSize < 1) {
+                        dynamicPageSize = 1;
+                    }
+                }
+
+                // Ensure dynamicPageSize does not exceed 200
+                if (dynamicPageSize > 200) {
+                    dynamicPageSize = 200;
+                }
+
                 if (!cachedData || cachedData.numTxs !== apiNumTxs) {
                     this.updateLocks.set(address, true);
                     try {
-                        this.logger.log(`[${address}] Cache needs update, changing status to UPDATING`);
-                        await this._updateCache(address, apiNumTxs, pageSize);
+                        this.logger.log(`[${address}] Cache needs update, updating with dynamic page size: ${dynamicPageSize}`);
+                        await this._updateCache(address, apiNumTxs, dynamicPageSize);
                     } finally {
                         this.updateLocks.delete(address);
                     }
@@ -329,14 +356,16 @@ class ChronikCache {
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
-                    // 使用传入的 pageOffset
-                    const apiResult = await this.chronik.address(address).history(pageOffset, apiPageSize);
-                    this.logger.log(`[${address}] API txs count: ${apiResult.numTxs}`);
+                    // 使用单独的 (0,1) 请求来快速获取最新的 numTxs
+                    const quickResult = await this._quickGetTxCount(address);
+                    const apiNumTxs = quickResult;
+                    this.logger.log(`[${address}] Quick API numTxs: ${apiNumTxs}`);
+
                     if (currentStatus !== CACHE_STATUS.UPDATING) {
-                        this._checkAndUpdateCache(address, apiResult.numTxs, this.defaultPageSize);
+                        this._checkAndUpdateCache(address, apiNumTxs, this.defaultPageSize);
                     }
 
-                    // 如果请求的 pageSize 大于 200，返回提示信息
+                    // 如果用户请求的 pageSize 大于 200，返回提示信息
                     if (pageSize > 200) {
                         return {
                             message: "Cache is being prepared. Please wait for cache to be ready when requesting more than 200 transactions.",
@@ -346,6 +375,8 @@ class ChronikCache {
                         };
                     }
                     
+                    // 使用原始的用户请求参数获取所需数据
+                    const apiResult = await this.chronik.address(address).history(pageOffset, apiPageSize);
                     return apiResult;
                 }
 
@@ -452,6 +483,7 @@ class ChronikCache {
     }
 
     async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize) {
+        // 如果 apiNumTxs 超过最大内存限制，则直接退出
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[Token ${tokenId}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
@@ -466,17 +498,33 @@ class ChronikCache {
         Promise.resolve().then(async () => {
             try {
                 const cachedData = await this._readCache(tokenId);
+                let dynamicPageSize = pageSize; // 默认值
+
+                if (cachedData && typeof cachedData.numTxs === 'number') {
+                    dynamicPageSize = apiNumTxs - cachedData.numTxs;
+                    // 确保 dynamicPageSize 至少为 1
+                    if (dynamicPageSize < 1) {
+                        dynamicPageSize = 1;
+                    }
+                }
+
+                // 确保 dynamicPageSize 不超过 200
+                if (dynamicPageSize > 200) {
+                    dynamicPageSize = 200;
+                }
+
                 if (!cachedData || cachedData.numTxs !== apiNumTxs) {
                     this.tokenUpdateLocks.set(tokenId, true);
                     try {
-                        this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING`);
-                        await this._updateTokenCache(tokenId, apiNumTxs, pageSize);
+                        this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING, dynamicPageSize: ${dynamicPageSize}`);
+                        await this._updateTokenCache(tokenId, apiNumTxs, dynamicPageSize);
                     } finally {
                         this.tokenUpdateLocks.delete(tokenId);
                     }
                 } else {
                     this.logger.log(`[Token ${tokenId}] Cache is up to date, setting status to LATEST`);
                     this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
+                    await this._initWebsocketForToken(tokenId);
                 }
             } catch (error) {
                 this.logger.error('Token cache update error:', error);
@@ -513,12 +561,14 @@ class ChronikCache {
 
                     const result = await this.chronik.tokenId(tokenId).history(currentPage, pageSize);
 
+                    // Merge new data
                     result.txs.forEach(tx => {
                         if (!txMap.has(tx.txid)) {
                             txMap.set(tx.txid, tx);
                         }
                     });
 
+                    // Update cache file
                     const updatedData = {
                         txMap: Object.fromEntries(txMap),
                         txOrder: Array.from(txMap.keys()),
@@ -530,7 +580,9 @@ class ChronikCache {
                     currentPage++;
                 }
 
+                // Set token cache status to LATEST and initialize WebSocket for token
                 this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
+                await this._initWebsocketForToken(tokenId);
             } catch (error) {
                 this.logger.error('[Cache] Error in _updateTokenCache:', error);
                 throw error;
@@ -547,14 +599,30 @@ class ChronikCache {
                 const currentStatus = this._getTokenCacheStatus(tokenId);
                 const cachedData = await this._readCache(tokenId);
                 const cachedCount = cachedData ? cachedData.numTxs : 0;
-
                 this.logger.log(`[Token ${tokenId}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
 
+                // 检查 WebSocket 定时器状态
+                const wsTimeInfo = this.wsManager.getRemainingTime(tokenId);
+                if (wsTimeInfo.active) {
+                    this.logger.log(`[Token ${tokenId}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                } else {
+                    this.logger.log(`[Token ${tokenId}] ${wsTimeInfo.message}`);
+                    if (currentStatus === CACHE_STATUS.LATEST) {
+                        await this._initWebsocketForToken(tokenId);
+                    }
+                }
+
+                if (currentStatus === CACHE_STATUS.LATEST) {
+                    this.wsManager.resetWsTimer(tokenId);
+                }
+
                 if (currentStatus !== CACHE_STATUS.LATEST) {
-                    const apiResult = await this.chronik.tokenId(tokenId).history(pageOffset, apiPageSize);
-                    this.logger.log(`[Token ${tokenId}] API txs count: ${apiResult.numTxs}`);
+                    const quickResult = await this._quickGetTxCount(tokenId, 'token');
+                    const apiNumTxs = quickResult;
+                    this.logger.log(`[Token ${tokenId}] Quick API numTxs: ${apiNumTxs}`);
+
                     if (currentStatus !== CACHE_STATUS.UPDATING) {
-                        this._checkAndUpdateTokenCache(tokenId, apiResult.numTxs, this.defaultPageSize);
+                        this._checkAndUpdateTokenCache(tokenId, apiNumTxs, this.defaultPageSize);
                     }
 
                     if (pageSize > 200) {
@@ -566,6 +634,7 @@ class ChronikCache {
                         };
                     }
                     
+                    const apiResult = await this.chronik.tokenId(tokenId).history(pageOffset, apiPageSize);
                     return apiResult;
                 }
 
@@ -589,6 +658,24 @@ class ChronikCache {
                 return await this.getTokenHistory(tokenId, pageOffset, pageSize);
             }
         };
+    }
+
+    // 新增快速获取交易数量的方法
+    async _quickGetTxCount(identifier, type = 'address') {
+        try {
+            let result;
+            if (type === 'address') {
+                result = await this.chronik.address(identifier).history(0, 1);
+            } else if (type === 'token') {
+                result = await this.chronik.tokenId(identifier).history(0, 1);
+            } else {
+                throw new Error(`Unsupported type: ${type}`);
+            }
+            return result.numTxs;
+        } catch (error) {
+            this.logger.error('Error in _quickGetTxCount:', error);
+            throw error;
+        }
     }
 }
 

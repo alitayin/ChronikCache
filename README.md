@@ -1,4 +1,4 @@
-# ChronikCache V0.3.2
+# ChronikCache V0.3.4
 
 ChronikCache is an npm package that provides a caching layer for Chronik.
 
@@ -34,13 +34,13 @@ const ChronikCache = require('chronik-cache');
 
 const chronikCache = new ChronikCache(chronik, {
   maxMemory: 50000,                     // Maximum number of transactions to cache in memory
-  maxCacheSize: 100,                    // Maximum disk size in MB for the local cache
+  maxCacheSize: 1024,                    // Maximum disk size in MB for the local cache
   failoverOptions: {                    // Options for the internal FailoverHandler
     retryAttempts: 3,
     retryDelayMs: 1500
   },
-  wsTimeout: 30000,                     // WebSocket timeout in milliseconds
-  wsExtendTimeout: 60000,              // Extended WebSocket timeout in milliseconds
+  wsTimeout: 86000000,                     // WebSocket timeout in milliseconds
+  wsExtendTimeout: 43000000,              // Extended WebSocket timeout in milliseconds
   enableLogging: true
 });
 ```
