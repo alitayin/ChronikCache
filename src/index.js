@@ -10,7 +10,7 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = false,
+        enableLogging = true,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -37,16 +37,33 @@ class ChronikCache {
             wsExtendTimeout
         });
         this.updateLocks = new Map();
-
         // Add script type to address cache mapping
         this.scriptToAddressMap = new Map();
-
         // Add failover handler
         this.failover = new FailoverHandler(failoverOptions);
-
         // 添加token缓存相关的Map
         this.tokenStatusMap = new Map();
         this.tokenUpdateLocks = new Map();
+        return new Proxy(this, {
+            get: (target, prop) => {
+                // 如果是 ChronikCache 自己的方法或属性，直接返回
+                if (prop in target) {
+                    return target[prop];
+                }
+                // 如果底层 chronik 有这个方法，则传递调用
+                if (typeof chronik[prop] === 'function') {
+                    return (...args) => {
+                        this.logger.log(`Forwarding uncached method call: ${prop}`);
+                        return chronik[prop](...args);
+                    };
+                }
+                // 如果底层 chronik 有这个属性，返回属性值
+                if (prop in chronik) {
+                    return chronik[prop];
+                }
+                return undefined;
+            }
+        });
     }
 
     // Read cache from database
