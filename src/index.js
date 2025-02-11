@@ -13,7 +13,7 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = false,
+        enableLogging = true,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -331,31 +331,35 @@ class ChronikCache {
                     
                     if (currentSize >= totalNumTxs) {
                         if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
-                            this.logger.log(`[${address}] Final write cache time start`);
+                            // Timing final cache write
+                            this.logger.startTimer(`[${address}] Final write cache`);
                             const updatedData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
                             await this._writeCache(address, updatedData);
-                            this.logger.log(`[${address}] Final write cache time end`);
+                            this.logger.endTimer(`[${address}] Final write cache`);
                         }
                         this.logger.log(`[${address}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
         
-                    this.logger.log(`[${address}] Fetch history time start`);
+                    // Timing fetching history
+                    this.logger.startTimer(`[${address}] Fetch history`);
                     const result = await this.chronik.address(address).history(currentPage, pageSize);
-                    this.logger.log(`[${address}] Fetch history time end`);
+                    this.logger.endTimer(`[${address}] Fetch history`);
         
-                    this.logger.log(`[${address}] Process tx time start`);
+                    // Timing processing transactions
+                    this.logger.startTimer(`[${address}] Process tx`);
                     result.txs.forEach(tx => {
                         if (!localTxMap.has(tx.txid)) {
                             localTxMap.set(tx.txid, tx);
                         }
                     });
-                    this.logger.log(`[${address}] Process tx time end`);
+                    this.logger.endTimer(`[${address}] Process tx`);
         
-                    this.logger.log(`[${address}] Sorting tx order time start`);
+                    // Timing sorting transaction order
+                    this.logger.startTimer(`[${address}] Sorting tx order`);
                     localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
                         const txA = localTxMap.get(a);
                         const txB = localTxMap.get(b);
@@ -372,28 +376,28 @@ class ChronikCache {
                             return txB.timestamp - txA.timestamp;
                         }
                     });
-                    this.logger.log(`[${address}] Sorting tx order time end`);
+                    this.logger.endTimer(`[${address}] Sorting tx order`);
         
                     if (localTxMap.size >= 20000) {
                         if (iterationCount % 10 === 0) {
-                            this.logger.log(`[${address}] Write cache time start`);
+                            this.logger.startTimer(`[${address}] Write cache`);
                             const updatedData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
                             await this._writeCache(address, updatedData);
-                            this.logger.log(`[${address}] Write cache time end`);
+                            this.logger.endTimer(`[${address}] Write cache`);
                         } else {
                             this.logger.log(`[${address}] Skipping DB write to reduce overhead (iteration ${iterationCount}).`);
                         }
                     } else {
-                        this.logger.log(`[${address}] Write cache time start`);
+                        this.logger.startTimer(`[${address}] Write cache`);
                         const updatedData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
                         await this._writeCache(address, updatedData);
-                        this.logger.log(`[${address}] Write cache time end`);
+                        this.logger.endTimer(`[${address}] Write cache`);
                     }
         
                     currentPage++;
@@ -705,7 +709,6 @@ class ChronikCache {
                 this.logger.log(`[${tokenId}] Starting cache update.`);
                 let currentPage = 0;
                 let iterationCount = 0;
-                // Initialize local cache from DB if available
                 let localCache = await this._readCache(tokenId) || { txMap: {}, txOrder: [] };
                 let localTxMap = new Map(Object.entries(localCache.txMap));
                 let localTxOrder = localCache.txOrder;
@@ -716,31 +719,31 @@ class ChronikCache {
         
                     if (currentSize >= totalNumTxs) {
                         if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
-                            this.logger.log(`[${tokenId}] Final write cache time start`);
+                            this.logger.startTimer(`[${tokenId}] Final write cache`);
                             const updatedData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
                             await this._writeCache(tokenId, updatedData, true);
-                            this.logger.log(`[${tokenId}] Final write cache time end`);
+                            this.logger.endTimer(`[${tokenId}] Final write cache`);
                         }
                         this.logger.log(`[${tokenId}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
         
-                    this.logger.log(`[${tokenId}] Fetch history time start`);
+                    this.logger.startTimer(`[${tokenId}] Fetch history`);
                     const result = await this.chronik.tokenId(tokenId).history(currentPage, pageSize);
-                    this.logger.log(`[${tokenId}] Fetch history time end`);
+                    this.logger.endTimer(`[${tokenId}] Fetch history`);
         
-                    this.logger.log(`[${tokenId}] Process tx time start`);
+                    this.logger.startTimer(`[${tokenId}] Process tx`);
                     result.txs.forEach(tx => {
                         if (!localTxMap.has(tx.txid)) {
                             localTxMap.set(tx.txid, tx);
                         }
                     });
-                    this.logger.log(`[${tokenId}] Process tx time end`);
+                    this.logger.endTimer(`[${tokenId}] Process tx`);
         
-                    this.logger.log(`[${tokenId}] Sorting tx order time start`);
+                    this.logger.startTimer(`[${tokenId}] Sorting tx order`);
                     localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
                         const txA = localTxMap.get(a);
                         const txB = localTxMap.get(b);
@@ -757,28 +760,28 @@ class ChronikCache {
                             return txB.timestamp - txA.timestamp;
                         }
                     });
-                    this.logger.log(`[${tokenId}] Sorting tx order time end`);
+                    this.logger.endTimer(`[${tokenId}] Sorting tx order`);
         
                     if (localTxMap.size >= 20000) {
                         if (iterationCount % 10 === 0) {
-                            this.logger.log(`[${tokenId}] Write cache time start`);
+                            this.logger.startTimer(`[${tokenId}] Write cache`);
                             const updatedData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
                             await this._writeCache(tokenId, updatedData, true);
-                            this.logger.log(`[${tokenId}] Write cache time end`);
+                            this.logger.endTimer(`[${tokenId}] Write cache`);
                         } else {
                             this.logger.log(`[${tokenId}] Skipping DB write to reduce overhead (iteration ${iterationCount}).`);
                         }
                     } else {
-                        this.logger.log(`[${tokenId}] Write cache time start`);
+                        this.logger.startTimer(`[${tokenId}] Write cache`);
                         const updatedData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
                         await this._writeCache(tokenId, updatedData, true);
-                        this.logger.log(`[${tokenId}] Write cache time end`);
+                        this.logger.endTimer(`[${tokenId}] Write cache`);
                     }
         
                     currentPage++;
