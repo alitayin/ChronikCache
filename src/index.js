@@ -1056,6 +1056,14 @@ class ChronikCache {
             this.logger.log(`Evicted globalMetadataCache entry for key ${oldestKey}`);
         }
     }
+
+    // 新增公共方法 getCacheStatus, 方便用户直接查询缓存状态
+    getCacheStatus(identifier, isToken = false) {
+        if (isToken) {
+            return this._getTokenCacheStatus(identifier);
+        }
+        return this._getCacheStatus(identifier);
+    }
 }
 
 module.exports = ChronikCache; 

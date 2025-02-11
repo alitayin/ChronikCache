@@ -1,4 +1,4 @@
-# ChronikCache V0.9.0
+# ChronikCache V0.9.1
 
 ChronikCache is an npm package that provides a caching layer for Chronik.  
 
@@ -75,21 +75,44 @@ const tokenHistory = await chronikCache.tokenId(tokenId).history(pageOffset, pag
 
 ### Cache Management
 
-1. **clearAddressCache(address)**  
-   Clears the local cache for a given address and unsubscribes the address's WebSocket connection.  
-   ```js
-   await chronikCache.clearAddressCache('ecash:qq...');
-   ```
+ChronikCache provides the following methods to manage cache for addresses and tokens:
 
-2. **clearAllCache()**  
-   Clears all local caches and unsubscribes from all WebSocket connections.  
-   ```js
-   await chronikCache.clearAllCache();
-   ```
+1. **clearAddressCache(address)**
+   - Clears the local cache for the given address. This method deletes both the `txMap` and `txOrder` entries (including paginated keys) and unsubscribes from the address's WebSocket connection.
+   - Example:
+     ```js
+     await chronikCache.clearAddressCache('ecash:qq...');
+     ```
 
-3. **_getCacheStatus(address)**  
-   Retrieves the internal cache status of an address (e.g., **`UNKNOWN`**, **`UPDATING`**, **`LATEST`**).  
+2. **clearTokenCache(tokenId)**
+   - Clears the cache for the specified token and, if supported, unsubscribes from its WebSocket connection.
+   - Example:
+     ```js
+     await chronikCache.clearTokenCache('tokenId...');
+     ```
+
+3. **clearAllCache()**
+   - Clears all local caches (for both addresses and tokens) and unsubscribes from all WebSocket connections.
+   - Example:
+     ```js
+     await chronikCache.clearAllCache();
+     ```
+
+4. **getCacheStatus(identifier, isToken = false)**
+   - Retrieves the current cache status for an address or token.
+   - For addresses, pass the address string as the `identifier`, and for tokens, pass `true` as the second parameter.
+   - Possible status values include:
+     - `UNKNOWN`: The cache status is unknown or uninitialized.
+     - `UPDATING`: The cache is currently being updated.
+     - `LATEST`: The cache is up to date.
+   - Example:
+     ```js
+     const status = chronikCache.getCacheStatus('ecash:qq...');
+     console.log(`Cache status: ${status}`);
+     ```
 
 ---
+
+For more details, visit my GitHub repository: [@https://github.com/alitayin/ChronikCache](https://github.com/alitayin/ChronikCache)
 
  [MIT licensed](./LICENSE).
