@@ -4,13 +4,16 @@ const Logger = require('./lib/Logger');
 const { encodeCashAddress } = require('ecashaddrjs');
 const { CACHE_STATUS, DEFAULT_CONFIG } = require('./constants');
 const FailoverHandler = require('./lib/failover');
+const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY; 
+const { computeHash } = require('./lib/utils');
+
 
 class ChronikCache {
     constructor(chronik, {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = true,
+        enableLogging = false,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -44,6 +47,8 @@ class ChronikCache {
         // 添加token缓存相关的Map
         this.tokenStatusMap = new Map();
         this.tokenUpdateLocks = new Map();
+        // 初始化全局元数据缓存，防止频繁访问数据库
+        this.globalMetadataCache = new Map();
         return new Proxy(this, {
             get: (target, prop) => {
                 // 如果是 ChronikCache 自己的方法或属性，直接返回
@@ -66,66 +71,142 @@ class ChronikCache {
         });
     }
 
-    // Read cache from database
-    async _readCache(address) {
-        const cache = await this.db.get(address);
-        if (!cache || !cache.txMap || !cache.txOrder || !cache.numPages || !cache.numTxs) {
+    // Read cache from database by reading txMap and txOrder separately
+    async _readCache(addressOrTokenId) {
+        try {
+            let txOrder, txMap;
+
+            // Check for paginated txOrder
+            let txOrderMeta = await this.db.get(`${addressOrTokenId}:txOrder:meta`);
+            if (txOrderMeta) {
+                const { pageCount } = txOrderMeta;
+                txOrder = [];
+                for (let i = 0; i < pageCount; i++) {
+                    let chunk = await this.db.get(`${addressOrTokenId}:txOrder:${i}`);
+                    txOrder = txOrder.concat(chunk);
+                }
+            } else {
+                txOrder = await this.db.get(`${addressOrTokenId}:txOrder`);
+            }
+            if (!txOrder) return null;
+
+            // Check for paginated txMap
+            let txMapMeta = await this.db.get(`${addressOrTokenId}:txMap:meta`);
+            if (txMapMeta) {
+                const { pageCount } = txMapMeta;
+                txMap = {};
+                for (let i = 0; i < pageCount; i++) {
+                    let chunk = await this.db.get(`${addressOrTokenId}:txMap:${i}`);
+                    txMap = Object.assign(txMap, chunk);
+                }
+            } else {
+                txMap = await this.db.get(`${addressOrTokenId}:txMap`);
+            }
+
+            // Update global metadata
+            const now = Date.now();
+            let metadata = await this._getGlobalMetadata(addressOrTokenId);
+            if (!metadata) {
+                metadata = { accessCount: 0, createdAt: now };
+            }
+            metadata.accessCount = (metadata.accessCount || 0) + 1;
+            metadata.lastAccessAt = now;
+            this._updateGlobalMetadata(addressOrTokenId, metadata);
+
+            return { 
+                txMap, 
+                txOrder, 
+                numTxs: (metadata.numTxs !== undefined ? metadata.numTxs : txOrder.length) 
+            };
+        } catch (error) {
             return null;
         }
-
-        // Update metadata access information
-        const now = Date.now();
-        cache.metadata = cache.metadata || {};
-        cache.metadata.accessCount = (cache.metadata.accessCount || 0) + 1;
-        cache.metadata.lastAccessAt = now;
-
-        // Asynchronously write back to database
-        this.db.put(address, cache);
-
-        return cache;
     }
+    
+    // Write cache into database with pagination support if tx count exceeds MAX_ITEMS_PER_KEY
+    async _writeCache(addressOrTokenId, data, isToken = false) {
+        // Use computeHash to generate hash value
+        const newHash = computeHash(data.txOrder);
 
-    // 写入缓存
-    async _writeCache(address, data) {
-        let existingCache = await this.db.get(address);
-        const now = Date.now();
-
-        const cacheData = {
-            txMap: data.txMap,
-            txOrder: data.txOrder,
-            numPages: data.numPages,
-            numTxs: data.numTxs,
-            metadata: {
-                createdAt: existingCache?.metadata?.createdAt || now,
-                accessCount: existingCache?.metadata?.accessCount || 0,
-                lastAccessAt: existingCache?.metadata?.lastAccessAt || now,
-                updatedAt: now
-            }
-        };
-
-        // Check cache size and clean if necessary
-        const currentSize = await this.db.calculateCacheSize();
-        if (currentSize > this.maxCacheSize) {
-            this.logger.log('Cache size exceeded limit, cleaning least accessed entries...');
-            await this.db.cleanLeastAccessedCache();
+        // 尝试从全局元数据中拿到之前保存的哈希值
+        let metadata = await this._getGlobalMetadata(addressOrTokenId, isToken);
+        if (metadata && metadata.dataHash && metadata.dataHash === newHash) {
+            this.logger.log(`No change detected for ${isToken ? 'token' : 'address'}: ${addressOrTokenId}, skipping DB update.`);
+            return;
         }
 
-        await this.db.put(address, cacheData);
-        this.logger.log(`Cache written for ${address}`);
+        const totalTxs = data.txOrder.length;
+        if (totalTxs > MAX_ITEMS_PER_KEY) {
+            const pageCount = Math.ceil(totalTxs / MAX_ITEMS_PER_KEY);
+            for (let i = 0; i < pageCount; i++) {
+                let chunk = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
+                await this.db.put(`${addressOrTokenId}:txOrder:${i}`, chunk);
+            }
+            await this.db.put(`${addressOrTokenId}:txOrder:meta`, { pageCount, totalTxs });
+            
+            for (let i = 0; i < pageCount; i++) {
+                let chunkKeys = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
+                let chunkMap = {};
+                for (const txid of chunkKeys) {
+                    chunkMap[txid] = data.txMap[txid];
+                }
+                await this.db.put(`${addressOrTokenId}:txMap:${i}`, chunkMap);
+            }
+            await this.db.put(`${addressOrTokenId}:txMap:meta`, { pageCount, totalTxs });
+        } else {
+            await this.db.put(`${addressOrTokenId}:txMap`, data.txMap);
+            await this.db.put(`${addressOrTokenId}:txOrder`, data.txOrder);
+        }
+        
+        // 更新全局元数据，包括新生成的哈希值
+        metadata = metadata || { accessCount: 0, createdAt: Date.now() };
+        metadata.dataHash = newHash;
+        metadata.numTxs = totalTxs;
+        metadata.updatedAt = Date.now();
+        await this._updateGlobalMetadata(addressOrTokenId, metadata, isToken);
+
+        this.logger.log(`Cache written for ${isToken ? 'token' : 'address'}: ${addressOrTokenId}`);
+    }
+
+    // 更新全局元数据
+    async _updateGlobalMetadata(identifier, metadata, isToken = false) {
+        const key = isToken ? `token:${identifier}` : `address:${identifier}`;
+        await this.db.updateGlobalMetadata(key, metadata);
+        // 更新内存中的元数据缓存
+        this.globalMetadataCache.set(key, metadata);
+    }
+
+    // 获取全局元数据
+    async _getGlobalMetadata(identifier, isToken = false) {
+        const key = isToken ? `token:${identifier}` : `address:${identifier}`;
+        // 先尝试从内存缓存中获取
+        if (this.globalMetadataCache.has(key)) {
+            return this.globalMetadataCache.get(key);
+        }
+        // 从数据库中获取
+        const metadata = await this.db.getGlobalMetadata(key);
+        if (metadata) {
+            // 缓存到内存中
+            this.globalMetadataCache.set(key, metadata);
+        }
+        return metadata;
     }
 
     /* --------------------- 初始化 WebSocket --------------------- */
 
     async _initWebsocketForAddress(address) {
-        // Use failover's handleWebSocketOperation to handle WebSocket initialization
         return await this.failover.handleWebSocketOperation(async () => {
             this.wsManager.resetWsTimer(address, (addr) => {
                 this._setCacheStatus(addr, CACHE_STATUS.UNKNOWN);
             });
 
-            await this.wsManager.initWebsocketForAddress(address, async (addr) => {
-                const apiNumTxs = await this._quickGetTxCount(addr, 'address');
-                await this._updateCache(addr, apiNumTxs, this.defaultPageSize);
+            await this.wsManager.initWebsocketForAddress(address, async (addr, txid, msgType) => {
+                if (msgType === 'TX_ADDED_TO_MEMPOOL') {
+                    const apiNumTxs = await this._quickGetTxCount(addr, 'address');
+                    await this._updateCache(addr, apiNumTxs, this.defaultPageSize);
+                } else if (msgType === 'TX_FINALIZED') {
+                    await this._updateUnconfirmedTx(addr, txid);
+                }
             });
         }, address, 'WebSocket initialization');
     }
@@ -135,9 +216,14 @@ class ChronikCache {
             this.wsManager.resetWsTimer(tokenId, (id) => {
                 this._setTokenCacheStatus(id, CACHE_STATUS.UNKNOWN);
             });
-            await this.wsManager.initWebsocketForToken(tokenId, async (id) => {
-                const apiNumTxs = await this._quickGetTxCount(id, 'token');
-                await this._updateTokenCache(id, apiNumTxs, this.defaultPageSize);
+
+            await this.wsManager.initWebsocketForToken(tokenId, async (id, txid, msgType) => {
+                if (msgType === 'TX_ADDED_TO_MEMPOOL') {
+                    const apiNumTxs = await this._quickGetTxCount(id, 'token');
+                    await this._updateTokenCache(id, apiNumTxs, this.defaultPageSize);
+                } else if (msgType === 'TX_FINALIZED') {
+                    await this._updateUnconfirmedTx(id, txid);
+                }
             });
         }, tokenId, 'WebSocket initialization');
     }
@@ -227,57 +313,101 @@ class ChronikCache {
         return await this.failover.executeWithRetry(async () => {
             try {
                 if (totalNumTxs > this.maxMemory) {
-                    this.logger.log(`[${address}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update`);
+                    this.logger.log(`[${address}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update.`);
                     this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
                     return;
                 }
 
-                this.logger.log(`[${address}] Starting cache update`);
+                this.logger.log(`[${address}] Starting cache update.`);
                 let currentPage = 0;
-
+                let iterationCount = 0;
+                let localCache = await this._readCache(address) || { txMap: {}, txOrder: [] };
+                let localTxMap = new Map(Object.entries(localCache.txMap));
+                let localTxOrder = localCache.txOrder;
+                
                 while (true) {
-                    // Reload cache on each iteration to get actual transaction count
-                    const existingCache = await this._readCache(address);
-                    const txMap = new Map(Object.entries(existingCache?.txMap || {}));
-                    const currentSize = txMap.size;
-
-                    this.logger.log(`Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
+                    const currentSize = localTxMap.size;
+                    this.logger.log(`[${address}] Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
                     
                     if (currentSize >= totalNumTxs) {
-                        this.logger.log(`Cache update completed, final size: ${currentSize}`);
+                        if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
+                            this.logger.log(`[${address}] Final write cache time start`);
+                            const updatedData = {
+                                txMap: Object.fromEntries(localTxMap),
+                                txOrder: localTxOrder,
+                            };
+                            await this._writeCache(address, updatedData);
+                            this.logger.log(`[${address}] Final write cache time end`);
+                        }
+                        this.logger.log(`[${address}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
-
+        
+                    this.logger.log(`[${address}] Fetch history time start`);
                     const result = await this.chronik.address(address).history(currentPage, pageSize);
-
-                    // Merge new data
+                    this.logger.log(`[${address}] Fetch history time end`);
+        
+                    this.logger.log(`[${address}] Process tx time start`);
                     result.txs.forEach(tx => {
-                        if (!txMap.has(tx.txid)) {
-                            txMap.set(tx.txid, tx);
+                        if (!localTxMap.has(tx.txid)) {
+                            localTxMap.set(tx.txid, tx);
                         }
                     });
-
-                    // Update cache file
-                    const updatedData = {
-                        txMap: Object.fromEntries(txMap),
-                        txOrder: Array.from(txMap.keys()),
-                        numPages: Math.ceil(txMap.size / pageSize),
-                        numTxs: txMap.size
-                    };
-                    await this._writeCache(address, updatedData);
-
+                    this.logger.log(`[${address}] Process tx time end`);
+        
+                    this.logger.log(`[${address}] Sorting tx order time start`);
+                    localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
+                        const txA = localTxMap.get(a);
+                        const txB = localTxMap.get(b);
+                        
+                        if (!txA.isFinal && !txB.isFinal) {
+                            return txB.timeFirstSeen - txA.timeFirstSeen;
+                        } else if (!txA.isFinal) {
+                            return -1;
+                        } else if (!txB.isFinal) {
+                            return 1;
+                        } else {
+                            const heightDiff = txB.height - txA.height;
+                            if (heightDiff !== 0) return heightDiff;
+                            return txB.timestamp - txA.timestamp;
+                        }
+                    });
+                    this.logger.log(`[${address}] Sorting tx order time end`);
+        
+                    if (localTxMap.size >= 20000) {
+                        if (iterationCount % 10 === 0) {
+                            this.logger.log(`[${address}] Write cache time start`);
+                            const updatedData = {
+                                txMap: Object.fromEntries(localTxMap),
+                                txOrder: localTxOrder,
+                            };
+                            await this._writeCache(address, updatedData);
+                            this.logger.log(`[${address}] Write cache time end`);
+                        } else {
+                            this.logger.log(`[${address}] Skipping DB write to reduce overhead (iteration ${iterationCount}).`);
+                        }
+                    } else {
+                        this.logger.log(`[${address}] Write cache time start`);
+                        const updatedData = {
+                            txMap: Object.fromEntries(localTxMap),
+                            txOrder: localTxOrder,
+                        };
+                        await this._writeCache(address, updatedData);
+                        this.logger.log(`[${address}] Write cache time end`);
+                    }
+        
                     currentPage++;
+                    iterationCount++;
                 }
-
-                // Check if cache status needs to be set to LATEST after update completion
+        
                 const currentStatus = this._getCacheStatus(address);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
-                    this.logger.log(`[${address}] Cache update complete, setting status to LATEST`);
+                    this.logger.log(`[${address}] Cache update complete, setting status to LATEST.`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
-
+        
                     await this._initWebsocketForAddress(address);
                 } else {
-                    this.logger.log(`[${address}] Cache update complete, maintaining LATEST status`);
+                    this.logger.log(`[${address}] Cache update complete, maintaining LATEST status.`);
                 }
             } catch (error) {
                 this.logger.error('[Cache] Error in _updateCache:', error);
@@ -319,26 +449,31 @@ class ChronikCache {
 
     /* --------------------- External Interface Methods --------------------- */
 
+    // Clear cache entries for an address by deleting both keys
     async clearAddressCache(address) {
-        // Delete local cache entry for the address
-        await this.db.del(address);
-        // Close WebSocket connection for this address
+        await Promise.all([
+            this.db.deletePaginated(`${address}:txMap`),
+            this.db.deletePaginated(`${address}:txOrder`)
+        ]);
         this.wsManager.unsubscribeAddress(address);
-        // Update status to UNKNOWN after clearing cache
         this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
         this.logger.log(`Cache cleared for address: ${address}`);
     }
 
     async clearAllCache() {
         try {
-            // Clear all local cache
+            // Clear all local cache data (addresses and tokens)
             await this.db.clear();
-            // Close all WebSocket connections
+            // Cancel all WebSocket subscriptions (addresses and tokens)
             this.wsManager.unsubscribeAll();
 
             // Update cache status to UNKNOWN for each address
             this.statusMap.forEach((_, addr) => {
                 this._setCacheStatus(addr, CACHE_STATUS.UNKNOWN);
+            });
+            // Update token cache status to UNKNOWN for each token
+            this.tokenStatusMap.forEach((_, tokenId) => {
+                this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
             });
             this.logger.log('All cache cleared successfully');
         } catch (error) {
@@ -354,7 +489,8 @@ class ChronikCache {
 
                 const currentStatus = this._getCacheStatus(address);
                 const cachedData = await this._readCache(address);
-                const cachedCount = cachedData ? cachedData.numTxs : 0;
+                const metadata = await this._getGlobalMetadata(address);
+                const cachedCount = metadata ? metadata.numTxs : (cachedData ? cachedData.numTxs : 0);
 
                 this.logger.log(`[${address}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
                 
@@ -451,14 +587,20 @@ class ChronikCache {
         const cache = await this._readCache(address);
         if (!cache) return null;
 
+        const metadata = await this._getGlobalMetadata(address);
+        if (!metadata) return null;
+
         const start = pageOffset * pageSize;
         const end = start + pageSize;
         const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
+        // 只检查当前页面的交易
+        this._updatePageUnconfirmedTxs(address, cache, txs);
+
         return {
             txs,
-            numPages: cache.numPages,
-            numTxs: cache.numTxs
+            numPages: Math.ceil(metadata.numTxs / pageSize),
+            numTxs: metadata.numTxs
         };
     }
 
@@ -555,51 +697,103 @@ class ChronikCache {
         return await this.failover.executeWithRetry(async () => {
             try {
                 if (totalNumTxs > this.maxMemory) {
-                    this.logger.log(`[${tokenId}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update`);
+                    this.logger.log(`[${tokenId}] Transaction count (${totalNumTxs}) exceeds maxMemory limit (${this.maxMemory}), aborting cache update.`);
                     this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
                     return;
                 }
 
-                this.logger.log(`[${tokenId}] Starting cache update`);
+                this.logger.log(`[${tokenId}] Starting cache update.`);
                 let currentPage = 0;
-
+                let iterationCount = 0;
+                // Initialize local cache from DB if available
+                let localCache = await this._readCache(tokenId) || { txMap: {}, txOrder: [] };
+                let localTxMap = new Map(Object.entries(localCache.txMap));
+                let localTxOrder = localCache.txOrder;
+        
                 while (true) {
-                    // Reload cache on each iteration to get actual transaction count
-                    const existingCache = await this._readCache(tokenId);
-                    const txMap = new Map(Object.entries(existingCache?.txMap || {}));
-                    const currentSize = txMap.size;
-
-                    this.logger.log(`Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
-                    
+                    const currentSize = localTxMap.size;
+                    this.logger.log(`[${tokenId}] Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
+        
                     if (currentSize >= totalNumTxs) {
-                        this.logger.log(`Cache update completed, final size: ${currentSize}`);
+                        if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
+                            this.logger.log(`[${tokenId}] Final write cache time start`);
+                            const updatedData = {
+                                txMap: Object.fromEntries(localTxMap),
+                                txOrder: localTxOrder,
+                            };
+                            await this._writeCache(tokenId, updatedData, true);
+                            this.logger.log(`[${tokenId}] Final write cache time end`);
+                        }
+                        this.logger.log(`[${tokenId}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
-
+        
+                    this.logger.log(`[${tokenId}] Fetch history time start`);
                     const result = await this.chronik.tokenId(tokenId).history(currentPage, pageSize);
-
-                    // Merge new data
+                    this.logger.log(`[${tokenId}] Fetch history time end`);
+        
+                    this.logger.log(`[${tokenId}] Process tx time start`);
                     result.txs.forEach(tx => {
-                        if (!txMap.has(tx.txid)) {
-                            txMap.set(tx.txid, tx);
+                        if (!localTxMap.has(tx.txid)) {
+                            localTxMap.set(tx.txid, tx);
                         }
                     });
-
-                    // Update cache file
-                    const updatedData = {
-                        txMap: Object.fromEntries(txMap),
-                        txOrder: Array.from(txMap.keys()),
-                        numPages: Math.ceil(txMap.size / pageSize),
-                        numTxs: txMap.size
-                    };
-                    await this._writeCache(tokenId, updatedData);
-
+                    this.logger.log(`[${tokenId}] Process tx time end`);
+        
+                    this.logger.log(`[${tokenId}] Sorting tx order time start`);
+                    localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
+                        const txA = localTxMap.get(a);
+                        const txB = localTxMap.get(b);
+                        
+                        if (!txA.isFinal && !txB.isFinal) {
+                            return txB.timeFirstSeen - txA.timeFirstSeen;
+                        } else if (!txA.isFinal) {
+                            return -1;
+                        } else if (!txB.isFinal) {
+                            return 1;
+                        } else {
+                            const heightDiff = txB.height - txA.height;
+                            if (heightDiff !== 0) return heightDiff;
+                            return txB.timestamp - txA.timestamp;
+                        }
+                    });
+                    this.logger.log(`[${tokenId}] Sorting tx order time end`);
+        
+                    if (localTxMap.size >= 20000) {
+                        if (iterationCount % 10 === 0) {
+                            this.logger.log(`[${tokenId}] Write cache time start`);
+                            const updatedData = {
+                                txMap: Object.fromEntries(localTxMap),
+                                txOrder: localTxOrder,
+                            };
+                            await this._writeCache(tokenId, updatedData, true);
+                            this.logger.log(`[${tokenId}] Write cache time end`);
+                        } else {
+                            this.logger.log(`[${tokenId}] Skipping DB write to reduce overhead (iteration ${iterationCount}).`);
+                        }
+                    } else {
+                        this.logger.log(`[${tokenId}] Write cache time start`);
+                        const updatedData = {
+                            txMap: Object.fromEntries(localTxMap),
+                            txOrder: localTxOrder,
+                        };
+                        await this._writeCache(tokenId, updatedData, true);
+                        this.logger.log(`[${tokenId}] Write cache time end`);
+                    }
+        
                     currentPage++;
+                    iterationCount++;
                 }
-
-                // Set token cache status to LATEST and initialize WebSocket for token
-                this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
-                await this._initWebsocketForToken(tokenId);
+        
+                const currentStatus = this._getTokenCacheStatus(tokenId);
+                if (currentStatus !== CACHE_STATUS.LATEST) {
+                    this.logger.log(`[${tokenId}] Cache update complete, setting status to LATEST.`);
+                    this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
+        
+                    await this._initWebsocketForToken(tokenId);
+                } else {
+                    this.logger.log(`[${tokenId}] Cache update complete, maintaining LATEST status.`);
+                }
             } catch (error) {
                 this.logger.error('[Cache] Error in _updateTokenCache:', error);
                 throw error;
@@ -608,14 +802,16 @@ class ChronikCache {
     }
 
     async getTokenHistory(tokenId, pageOffset = 0, pageSize = 200) {
+        this.logger.log('[DEBUG] getTokenHistory called with:', { tokenId, pageOffset, pageSize });
+        const apiPageSize = Math.min(200, pageSize);
+        const cachePageSize = Math.min(15000, pageSize);
+        this.logger.log('[DEBUG] getTokenHistory - computed:', { apiPageSize, cachePageSize });
         return await this.failover.executeWithRetry(async () => {
             try {
-                const apiPageSize = Math.min(200, pageSize);
-                const cachePageSize = Math.min(4000, pageSize);
-
                 const currentStatus = this._getTokenCacheStatus(tokenId);
                 const cachedData = await this._readCache(tokenId);
-                const cachedCount = cachedData ? cachedData.numTxs : 0;
+                const metadata = await this._getGlobalMetadata(tokenId, true);
+                const cachedCount = metadata ? metadata.numTxs : (cachedData ? cachedData.numTxs : 0);
                 this.logger.log(`[Token ${tokenId}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
 
                 // 检查 WebSocket 定时器状态
@@ -655,7 +851,7 @@ class ChronikCache {
                     return apiResult;
                 }
 
-                const cachedResult = await this._getPageFromCache(tokenId, pageOffset, cachePageSize);
+                const cachedResult = await this._getTokenPageFromCache(tokenId, pageOffset, cachePageSize);
                 if (cachedResult) {
                     return cachedResult;
                 }
@@ -693,6 +889,182 @@ class ChronikCache {
             this.logger.error('Error in _quickGetTxCount:', error);
             throw error;
         }
+    }
+
+    // For token cache clear, rely on dbUtils.clearTokenCache (see below)
+    async clearTokenCache(tokenId) {
+        await this.db.clearTokenCache(tokenId);
+        if (typeof this.wsManager.unsubscribeToken === 'function') {
+            this.wsManager.unsubscribeToken(tokenId);
+        }
+        this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
+        this.logger.log(`Cache cleared for token: ${tokenId}`);
+    }
+
+    // 修改 _updateUnconfirmedTx 方法，使其接受 addressOrTokenId 参数
+    async _updateUnconfirmedTx(addressOrTokenId, txid) {
+        try {
+            const updatedTx = await this.chronik.tx(txid);
+            let cache = await this._readCache(addressOrTokenId);
+            if (!cache || !cache.txMap) {
+                this.logger.log(`[${addressOrTokenId}] Cache not found or empty when updating tx`);
+                return;
+            }
+            if (cache.txMap[txid]) {
+                cache.txMap[txid] = updatedTx;
+                // 重新排序 txOrder（因为交易状态已更新）
+                cache.txOrder.sort((a, b) => {
+                    const txA = cache.txMap[a];
+                    const txB = cache.txMap[b];
+                    
+                    if (!txA.isFinal && !txB.isFinal) {
+                        return txB.timeFirstSeen - txA.timeFirstSeen;
+                    } else if (!txA.isFinal) {
+                        return -1;
+                    } else if (!txB.isFinal) {
+                        return 1;
+                    } else {
+                        const heightDiff = txB.height - txA.height;
+                        if (heightDiff !== 0) return heightDiff;
+                        return txB.timestamp - txA.timestamp;
+                    }
+                });
+                // 异步更新缓存
+                this._writeCache(addressOrTokenId, cache);
+                this.logger.log(`[${addressOrTokenId}] Updated tx ${txid} in cache`);
+            } else {
+                this.logger.log(`[${addressOrTokenId}] Tx ${txid} not found in cache`);
+            }
+        } catch (error) {
+            this.logger.error(`Error updating tx ${txid} in cache:`, error);
+        }
+    }
+
+    // 修改后的 _updatePageUnconfirmedTxs 方法
+    async _updatePageUnconfirmedTxs(address, cache, txsInCurrentPage) {
+        const unconfirmedTxids = txsInCurrentPage
+            .filter(tx => !tx.isFinal)
+            .map(tx => tx.txid);
+
+        if (unconfirmedTxids.length === 0) return;
+
+        let updated = false;
+
+        for (const txid of unconfirmedTxids) {
+            try {
+                const updatedTx = await this.chronik.tx(txid);
+                if (updatedTx && updatedTx.isFinal) {
+                    cache.txMap[txid] = updatedTx;
+                    this.logger.log(`[${address}] Updated tx ${txid} in cache`);
+                    updated = true;
+                } else {
+                    this.logger.log(`[${address}] Tx ${txid} is still unconfirmed, skipping update`);
+                }
+            } catch (error) {
+                this.logger.error(`Error updating tx ${txid} in cache:`, error);
+            }
+        }
+
+        if (updated) {
+            cache.txOrder.sort((a, b) => {
+                const txA = cache.txMap[a];
+                const txB = cache.txMap[b];
+
+                if (!txA.isFinal && !txB.isFinal) {
+                    return txB.timeFirstSeen - txA.timeFirstSeen;
+                } else if (!txA.isFinal) {
+                    return -1;
+                } else if (!txB.isFinal) {
+                    return 1;
+                } else {
+                    const heightDiff = txB.height - txA.height;
+                    if (heightDiff !== 0) return heightDiff;
+                    return txB.timestamp - txA.timestamp;
+                }
+            });
+            await this._writeCache(address, cache);
+        }
+    }
+
+    // 修改后的 _updatePageUnconfirmedTokenTxs 方法
+    async _updatePageUnconfirmedTokenTxs(tokenId, cache, txsInCurrentPage) {
+        const unconfirmedTxids = txsInCurrentPage
+            .filter(tx => !tx.isFinal)
+            .map(tx => tx.txid);
+
+        if (unconfirmedTxids.length === 0) return;
+
+        // 标记是否有交易更新
+        let updated = false;
+
+        // 顺序更新每个 tx
+        for (const txid of unconfirmedTxids) {
+            try {
+                const updatedTx = await this.chronik.tx(txid);
+                if (updatedTx && updatedTx.isFinal) {
+                    cache.txMap[txid] = updatedTx;
+                    this.logger.log(`[${tokenId}] Updated tx ${txid} in cache`);
+                    updated = true;
+                } else {
+                    this.logger.log(`[${tokenId}] Tx ${txid} is still unconfirmed, skipping update`);
+                }
+            } catch (error) {
+                this.logger.error(`Error updating tx ${txid} in cache:`, error);
+            }
+        }
+
+        // 如果有交易更新，则重新排序一次并一次性写入缓存
+        if (updated) {
+            cache.txOrder.sort((a, b) => {
+                const txA = cache.txMap[a];
+                const txB = cache.txMap[b];
+
+                if (!txA.isFinal && !txB.isFinal) {
+                    return txB.timeFirstSeen - txA.timeFirstSeen;
+                } else if (!txA.isFinal) {
+                    return -1;
+                } else if (!txB.isFinal) {
+                    return 1;
+                } else {
+                    const heightDiff = txB.height - txA.height;
+                    if (heightDiff !== 0) return heightDiff;
+                    return txB.timestamp - txA.timestamp;
+                }
+            });
+            await this._writeCache(tokenId, cache);
+        }
+    }
+
+    // 修改 token 的 getPageFromCache 方法
+    async _getTokenPageFromCache(tokenId, pageOffset, pageSize) {
+        const cache = await this._readCache(tokenId);
+        if (!cache) return null;
+
+        const metadata = await this._getGlobalMetadata(tokenId, true);
+        if (!metadata) return null;
+
+        const start = pageOffset * pageSize;
+        const end = start + pageSize;
+        const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
+
+        // Debug: 输出当前获取缓存页的调试信息
+        this.logger.log('[DEBUG] _getTokenPageFromCache - tokenId:', tokenId,
+                    'pageOffset:', pageOffset,
+                    'pageSize:', pageSize,
+                    'start:', start,
+                    'end:', end,
+                    'txOrder length:', cache.txOrder.length,
+                    'metadata.numTxs:', metadata.numTxs,
+                    'computed numPages:', Math.ceil(metadata.numTxs / pageSize));
+
+        // Only check current page transactions
+        this._updatePageUnconfirmedTokenTxs(tokenId, cache, txs);
+
+        return {
+            txs,
+            numPages: Math.ceil(metadata.numTxs / pageSize),
+            numTxs: metadata.numTxs
+        };
     }
 }
 

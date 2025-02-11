@@ -1,6 +1,11 @@
-# ChronikCache V0.3.5
+# ChronikCache V0.8.0
 
-ChronikCache is an npm package that provides a caching layer for Chronik.
+ChronikCache is an npm package that provides a caching layer for Chronik.  
+
+- ChronikCache can be used seamlessly, as it automatically updates its cache in the background, including unconfirmed transaction updates via the `.history` method.  
+- The data is stored using a LevelDB key-value storage, ensuring fast read/write operations. However, LevelDB does not support simultaneous multi-process read/write operations, so a proxy or an alternative mediator is required in such scenarios.  
+- If you require a larger cache capacity (e.g., caching 100000 transactions), ensure that adequate memory is allocated to your process.  
+- There remains significant room for optimization in caching read/write performance.
 
 ---
 
@@ -41,7 +46,7 @@ const chronikCache = new ChronikCache(chronik, {
   },
   wsTimeout: 86000000,                     // WebSocket timeout in milliseconds
   wsExtendTimeout: 43000000,              // Extended WebSocket timeout in milliseconds
-  enableLogging: true
+  enableLogging: false
 });
 ```
 

@@ -101,11 +101,16 @@ class DbUtils {
             const entries = [];
             for await (const [key, value] of this.db.iterator()) {
                 const size = Buffer.byteLength(JSON.stringify(value), 'utf8');
-                this.logger.log(`[Debug] Found entry: ${key}, accessCount: ${value.metadata?.accessCount || 0}, size: ${size}`);
-                
+
+                // 获取全局元数据中的访问计数
+                const metadata = await this.getGlobalMetadata(key);
+                const accessCount = metadata?.accessCount || 0;
+
+                this.logger.log(`[Debug] Found entry: ${key}, accessCount: ${accessCount}, size: ${size}`);
+
                 entries.push({
-                    address: key,
-                    accessCount: value.metadata?.accessCount || 0,
+                    identifier: key,
+                    accessCount,
                     size
                 });
             }
@@ -115,10 +120,12 @@ class DbUtils {
             let i = 0;
             while (currentSize > this.maxCacheSize && i < entries.length) {
                 const entry = entries[i];
-                this.logger.log(`[Debug] Attempting to remove entry: ${entry.address}, currentSize: ${currentSize}`);
-                await this.del(entry.address);
+                this.logger.log(`[Debug] Attempting to remove entry: ${entry.identifier}, currentSize: ${currentSize}`);
+                await this.del(entry.identifier);
+                // 同时删除对应的全局元数据
+                await this.del(`metadata:${entry.identifier}`);
                 currentSize -= entry.size;
-                this.logger.log(`Cleaned cache for ${entry.address}, access count: ${entry.accessCount}`);
+                this.logger.log(`Cleaned cache for ${entry.identifier}, access count: ${entry.accessCount}`);
                 i++;
             }
 
@@ -141,6 +148,68 @@ class DbUtils {
         } catch (error) {
             this.logger.error('Error clearing all keys:', error);
         }
+    }
+
+    // Delete data stored in a paginated manner.
+    async deletePaginated(keyBase) {
+        return await this.failover.handleDbOperation(
+            async () => {
+                try {
+                    const meta = await this.db.get(`${keyBase}:meta`);
+                    if (meta) {
+                        const { pageCount } = meta;
+                        for (let i = 0; i < pageCount; i++) {
+                            await this.del(`${keyBase}:${i}`);
+                        }
+                        await this.del(`${keyBase}:meta`);
+                        return;
+                    }
+                } catch (error) {
+                    // If meta not found, fall through.
+                }
+                await this.del(keyBase);
+            },
+            `DB delete paginated operation for ${keyBase}`
+        );
+    }
+
+    // Unified DB token cache delete operation handler with pagination support
+    async clearTokenCache(tokenId) {
+        return await this.failover.handleDbOperation(
+            async () => {
+                await this.deletePaginated(`${tokenId}:txMap`);
+                await this.deletePaginated(`${tokenId}:txOrder`);
+                await this.del(`metadata:token:${tokenId}`);
+            },
+            `DB clear token cache operation for ${tokenId}`
+        );
+    }
+
+    // 添加用于存储全局元数据的方法
+    async updateGlobalMetadata(key, data) {
+        return await this.failover.handleDbOperation(
+            async () => {
+                await this.db.put(`metadata:${key}`, data);
+            },
+            `DB update global metadata operation for ${key}`
+        );
+    }
+
+    // 添加用于获取全局元数据的方法
+    async getGlobalMetadata(key, defaultValue = null) {
+        return await this.failover.handleDbOperation(
+            async () => {
+                try {
+                    return await this.db.get(`metadata:${key}`);
+                } catch (error) {
+                    if (error.notFound) {
+                        return defaultValue;
+                    }
+                    throw error;
+                }
+            },
+            `DB get global metadata operation for ${key}`
+        );
     }
 }
 

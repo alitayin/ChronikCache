@@ -29,12 +29,14 @@ class WebSocketManager {
                 const ws = this.chronik.ws({
                     onMessage: async (msg) => {
                         this.logger.log('[WS] Received message:', msg);
-                        if (msg.type === 'Tx' && msg.msgType === 'TX_ADDED_TO_MEMPOOL') {
-                            this.logger.log(`[WS] New transaction for ${address}`);
-                            try {
-                                await onNewTransaction(address);
-                            } catch (error) {
-                                this.logger.error('[WS] Failed to update cache after new transaction:', error);
+                        if (msg.type === 'Tx') {
+                            if (msg.msgType === 'TX_ADDED_TO_MEMPOOL' || msg.msgType === 'TX_FINALIZED') {
+                                this.logger.log(`[WS] Transaction ${msg.msgType} for ${address}`);
+                                try {
+                                    await onNewTransaction(address, msg.txid, msg.msgType);
+                                } catch (error) {
+                                    this.logger.error(`[WS] Failed to update cache after transaction ${msg.msgType}:`, error);
+                                }
                             }
                         }
                     },
@@ -57,6 +59,7 @@ class WebSocketManager {
 
                 await ws.waitForOpen();
                 ws.subscribeToAddress(address);
+                ws.subscriptionType = 'address';
                 this.wsSubscriptions.set(address, ws);
                 this.logger.log(`[WS] Successfully subscribed to ${address}`);
                 this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
@@ -78,12 +81,14 @@ class WebSocketManager {
                 const ws = this.chronik.ws({
                     onMessage: async (msg) => {
                         this.logger.log('[WS] Received message:', msg);
-                        if (msg.type === 'Tx' && msg.msgType === 'TX_ADDED_TO_MEMPOOL') {
-                            this.logger.log(`[WS] New transaction for Token ${tokenId}`);
-                            try {
-                                await onNewTransaction(tokenId);
-                            } catch (error) {
-                                this.logger.error('[WS] Failed to update token cache after new transaction:', error);
+                        if (msg.type === 'Tx') {
+                            if (msg.msgType === 'TX_ADDED_TO_MEMPOOL' || msg.msgType === 'TX_FINALIZED') {
+                                this.logger.log(`[WS] Transaction ${msg.msgType} for Token ${tokenId}`);
+                                try {
+                                    await onNewTransaction(tokenId, msg.txid, msg.msgType);
+                                } catch (error) {
+                                    this.logger.error(`[WS] Failed to update token cache after transaction ${msg.msgType}:`, error);
+                                }
                             }
                         }
                     },
@@ -107,6 +112,7 @@ class WebSocketManager {
 
                 await ws.waitForOpen();
                 ws.subscribeToTokenId(tokenId);
+                ws.subscriptionType = 'token';
                 this.wsSubscriptions.set(tokenId, ws);
                 this.logger.log(`[WS] Successfully subscribed to Token ${tokenId}`);
                 this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
@@ -127,11 +133,17 @@ class WebSocketManager {
     }
 
     unsubscribeAll() {
-        for (const [addr, ws] of this.wsSubscriptions) {
-            ws.unsubscribeFromAddress(addr);
+        for (const [key, ws] of this.wsSubscriptions) {
+            if (ws.subscriptionType === 'address') {
+                ws.unsubscribeFromAddress(key);
+            } else if (ws.subscriptionType === 'token') {
+                ws.unsubscribeFromTokenId(key);
+            } else {
+                ws.unsubscribeFromAddress(key);
+            }
         }
         this.wsSubscriptions.clear();
-        this.logger.log('[WS] Unsubscribed from all addresses.');
+        this.logger.log('[WS] Unsubscribed from all subscriptions (addresses and tokens).');
         this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
     }
 
