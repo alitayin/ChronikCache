@@ -1,4 +1,4 @@
-# ChronikCache V0.8.0
+# ChronikCache V0.8.1
 
 ChronikCache is an npm package that provides a caching layer for Chronik.  
 

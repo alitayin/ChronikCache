@@ -5,7 +5,7 @@ const { encodeCashAddress } = require('ecashaddrjs');
 const { CACHE_STATUS, DEFAULT_CONFIG } = require('./constants');
 const FailoverHandler = require('./lib/failover');
 const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY; 
-const { computeHash } = require('./lib/utils');
+const { computeHash } = require('./lib/hash');
 
 
 class ChronikCache {
