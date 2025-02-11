@@ -1,6 +1,7 @@
 class Logger {
-    constructor(enableLogging = false) {
+    constructor(enableLogging, enableTimer = false) {
         this.enableLogging = enableLogging;
+        this.enableTimer = enableTimer;
         this.timers = new Map();
     }
 
@@ -17,18 +18,19 @@ class Logger {
     }
 
     startTimer(label) {
-        this.timers.set(label, Date.now());
+        if (!this.enableTimer) return;
+        this.timers.set(label, process.hrtime());
         this.log(`${label} timer started`);
     }
 
     endTimer(label) {
-        if (this.timers.has(label)) {
-            const elapsed = Date.now() - this.timers.get(label);
-            this.log(`${label} timer ended: ${elapsed} ms`);
-            this.timers.delete(label);
-        } else {
-            this.log(`${label} timer not found`);
-        }
+        if (!this.enableTimer) return;
+        const startTime = this.timers.get(label);
+        if (!startTime) return;
+        const diff = process.hrtime(startTime);
+        const elapsed = diff[0] * 1000 + diff[1] / 1e6;
+        this.log(`${label} timer ended: ${elapsed} ms`);
+        this.timers.delete(label);
     }
 }
 

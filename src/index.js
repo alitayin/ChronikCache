@@ -33,7 +33,6 @@ class ChronikCache {
             enableLogging
         });
 
-        this.txCache = new Map();
         this.statusMap = new Map();
         this.wsManager = new WebSocketManager(chronik, failoverOptions, enableLogging, {
             wsTimeout,
@@ -49,6 +48,8 @@ class ChronikCache {
         this.tokenUpdateLocks = new Map();
         // 初始化全局元数据缓存，防止频繁访问数据库
         this.globalMetadataCache = new Map();
+        // Set LRU cache limit for global metadata cache
+        this.globalMetadataCacheLimit = DEFAULT_CONFIG.GLOBAL_METADATA_CACHE_LIMIT || 100;
         return new Proxy(this, {
             get: (target, prop) => {
                 // 如果是 ChronikCache 自己的方法或属性，直接返回
@@ -172,22 +173,30 @@ class ChronikCache {
     async _updateGlobalMetadata(identifier, metadata, isToken = false) {
         const key = isToken ? `token:${identifier}` : `address:${identifier}`;
         await this.db.updateGlobalMetadata(key, metadata);
-        // 更新内存中的元数据缓存
+        // Update in-memory metadata cache with LRU ordering
+        if (this.globalMetadataCache.has(key)) {
+            this.globalMetadataCache.delete(key);
+        }
         this.globalMetadataCache.set(key, metadata);
+        this._maintainGlobalMetadataCacheLimit();
     }
 
     // 获取全局元数据
     async _getGlobalMetadata(identifier, isToken = false) {
         const key = isToken ? `token:${identifier}` : `address:${identifier}`;
-        // 先尝试从内存缓存中获取
+        // Try to get from in-memory cache
         if (this.globalMetadataCache.has(key)) {
-            return this.globalMetadataCache.get(key);
+            // Update recency ordering by re-inserting the key
+            const metadata = this.globalMetadataCache.get(key);
+            this.globalMetadataCache.delete(key);
+            this.globalMetadataCache.set(key, metadata);
+            return metadata;
         }
-        // 从数据库中获取
+        // Get from database and cache it if found
         const metadata = await this.db.getGlobalMetadata(key);
         if (metadata) {
-            // 缓存到内存中
             this.globalMetadataCache.set(key, metadata);
+            this._maintainGlobalMetadataCacheLimit();
         }
         return metadata;
     }
@@ -317,7 +326,6 @@ class ChronikCache {
                     this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
                     return;
                 }
-
                 this.logger.log(`[${address}] Starting cache update.`);
                 let currentPage = 0;
                 let iterationCount = 0;
@@ -331,7 +339,6 @@ class ChronikCache {
                     
                     if (currentSize >= totalNumTxs) {
                         if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
-                            // Timing final cache write
                             this.logger.startTimer(`[${address}] Final write cache`);
                             const updatedData = {
                                 txMap: Object.fromEntries(localTxMap),
@@ -343,13 +350,11 @@ class ChronikCache {
                         this.logger.log(`[${address}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
-        
-                    // Timing fetching history
+            
                     this.logger.startTimer(`[${address}] Fetch history`);
                     const result = await this.chronik.address(address).history(currentPage, pageSize);
                     this.logger.endTimer(`[${address}] Fetch history`);
-        
-                    // Timing processing transactions
+            
                     this.logger.startTimer(`[${address}] Process tx`);
                     result.txs.forEach(tx => {
                         if (!localTxMap.has(tx.txid)) {
@@ -357,8 +362,7 @@ class ChronikCache {
                         }
                     });
                     this.logger.endTimer(`[${address}] Process tx`);
-        
-                    // Timing sorting transaction order
+            
                     this.logger.startTimer(`[${address}] Sorting tx order`);
                     localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
                         const txA = localTxMap.get(a);
@@ -377,7 +381,7 @@ class ChronikCache {
                         }
                     });
                     this.logger.endTimer(`[${address}] Sorting tx order`);
-        
+            
                     if (localTxMap.size >= 20000) {
                         if (iterationCount % 10 === 0) {
                             this.logger.startTimer(`[${address}] Write cache`);
@@ -399,16 +403,21 @@ class ChronikCache {
                         await this._writeCache(address, updatedData);
                         this.logger.endTimer(`[${address}] Write cache`);
                     }
-        
+            
                     currentPage++;
                     iterationCount++;
                 }
-        
+                
+                // 主动释放内存
+                this.logger.log(`[${address}] Cleaning up memory used for cache update.`);
+                localTxMap.clear();
+                localTxOrder = null;
+            
                 const currentStatus = this._getCacheStatus(address);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
                     this.logger.log(`[${address}] Cache update complete, setting status to LATEST.`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
-        
+            
                     await this._initWebsocketForAddress(address);
                 } else {
                     this.logger.log(`[${address}] Cache update complete, maintaining LATEST status.`);
@@ -551,41 +560,6 @@ class ChronikCache {
         }, `getAddressHistory for ${address}`);
     }
 
-    async _fetchAllHistory(address) {
-        try {
-            let allTxs = [];
-            let currentPage = 0;
-            let hasMorePages = true;
-
-            while (hasMorePages) {
-                this.logger.log(`Fetching page ${currentPage}...`);
-                const result = await this.chronik.address(address).history(currentPage, this.defaultPageSize);
-                allTxs = allTxs.concat(result.txs);
-                hasMorePages = currentPage + 1 < result.numPages;
-                currentPage++;
-            }
-
-            return {
-                txs: allTxs,
-                numPages: currentPage,
-                numTxs: allTxs.length
-            };
-        } catch (error) {
-            this.logger.error('Error fetching all history:', error);
-            throw error;
-        }
-    }
-
-    _getPageFromFullData(fullData, page, pageSize) {
-        const start = page * pageSize;
-        const end = start + pageSize;
-        const paginatedTxs = fullData.txs.slice(start, end);
-        return {
-            txs: paginatedTxs,
-            numPages: Math.ceil(fullData.txs.length / pageSize),
-            numTxs: fullData.txs.length
-        };
-    }
 
     async _getPageFromCache(address, pageOffset, pageSize) {
         const cache = await this._readCache(address);
@@ -787,6 +761,11 @@ class ChronikCache {
                     currentPage++;
                     iterationCount++;
                 }
+        
+                // 主动释放内存
+                this.logger.log(`[${tokenId}] Cleaning up memory used for cache update.`);
+                localTxMap.clear();
+                localTxOrder = null;
         
                 const currentStatus = this._getTokenCacheStatus(tokenId);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -1068,6 +1047,14 @@ class ChronikCache {
             numPages: Math.ceil(metadata.numTxs / pageSize),
             numTxs: metadata.numTxs
         };
+    }
+
+    _maintainGlobalMetadataCacheLimit() {
+        while (this.globalMetadataCache.size > this.globalMetadataCacheLimit) {
+            const oldestKey = this.globalMetadataCache.keys().next().value;
+            this.globalMetadataCache.delete(oldestKey);
+            this.logger.log(`Evicted globalMetadataCache entry for key ${oldestKey}`);
+        }
     }
 }
 
