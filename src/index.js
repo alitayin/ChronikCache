@@ -14,7 +14,7 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = false,
+        enableLogging = true,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -571,11 +571,36 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(address);
         if (!metadata) return null;
 
+        // 对缓存中的交易顺序进行排序
+        cache.txOrder.sort((a, b) => {
+            const txA = cache.txMap[a];
+            const txB = cache.txMap[b];
+            if (!txA.isFinal && !txB.isFinal) {
+                return txB.timeFirstSeen - txA.timeFirstSeen;
+            } else if (!txA.isFinal) {
+                return -1;
+            } else if (!txB.isFinal) {
+                return 1;
+            } else {
+                const heightDiff = txB.height - txA.height;
+                if (heightDiff !== 0) return heightDiff;
+                return txB.timestamp - txA.timestamp;
+            }
+        });
+
+        // 计算排序后的新 hash
+        const newHash = computeHash(cache.txOrder);
+        // 如果 hash 与元数据记录的不一致，则触发更新
+        if (newHash !== metadata.dataHash) {
+            this.logger.log(`[${address}] Cache order hash mismatch detected. Triggering cache update.`);
+            this._checkAndUpdateCache(address, metadata.numTxs, this.defaultPageSize);
+        }
+
         const start = pageOffset * pageSize;
         const end = start + pageSize;
         const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
-        // 只检查当前页面的交易
+        // 对当前页的未确认交易尝试进行更新
         this._updatePageUnconfirmedTxs(address, cache, txs);
 
         return {
@@ -1027,21 +1052,35 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(tokenId, true);
         if (!metadata) return null;
 
+        // 对 token 缓存中的交易顺序进行排序
+        cache.txOrder.sort((a, b) => {
+            const txA = cache.txMap[a];
+            const txB = cache.txMap[b];
+            if (!txA.isFinal && !txB.isFinal) {
+                return txB.timeFirstSeen - txA.timeFirstSeen;
+            } else if (!txA.isFinal) {
+                return -1;
+            } else if (!txB.isFinal) {
+                return 1;
+            } else {
+                const heightDiff = txB.height - txA.height;
+                if (heightDiff !== 0) return heightDiff;
+                return txB.timestamp - txA.timestamp;
+            }
+        });
+
+        // 计算新的哈希值并进行比对
+        const newHash = computeHash(cache.txOrder);
+        if (newHash !== metadata.dataHash) {
+            this.logger.log(`[${tokenId}] Token cache order hash mismatch detected. Triggering token cache update.`);
+            this._checkAndUpdateTokenCache(tokenId, metadata.numTxs, this.defaultPageSize);
+        }
+
         const start = pageOffset * pageSize;
         const end = start + pageSize;
         const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
-        // Debug: 输出当前获取缓存页的调试信息
-        this.logger.log('[DEBUG] _getTokenPageFromCache - tokenId:', tokenId,
-                    'pageOffset:', pageOffset,
-                    'pageSize:', pageSize,
-                    'start:', start,
-                    'end:', end,
-                    'txOrder length:', cache.txOrder.length,
-                    'metadata.numTxs:', metadata.numTxs,
-                    'computed numPages:', Math.ceil(metadata.numTxs / pageSize));
-
-        // Only check current page transactions
+        // 更新当前页中未确认的 token 交易
         this._updatePageUnconfirmedTokenTxs(tokenId, cache, txs);
 
         return {
