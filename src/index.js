@@ -6,6 +6,7 @@ const { CACHE_STATUS, DEFAULT_CONFIG } = require('./constants');
 const FailoverHandler = require('./lib/failover');
 const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY; 
 const { computeHash } = require('./lib/hash');
+const TaskQueue = require('./lib/TaskQueue');
 
 
 class ChronikCache {
@@ -13,7 +14,7 @@ class ChronikCache {
         maxMemory = DEFAULT_CONFIG.MAX_MEMORY,
         maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
         failoverOptions = {},
-        enableLogging = true,
+        enableLogging = false,
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
         wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
     } = {}) {
@@ -50,6 +51,8 @@ class ChronikCache {
         this.globalMetadataCache = new Map();
         // Set LRU cache limit for global metadata cache
         this.globalMetadataCacheLimit = DEFAULT_CONFIG.GLOBAL_METADATA_CACHE_LIMIT || 100;
+        // 初始化全局任务队列，最大并发 2 个
+        this.updateQueue = new TaskQueue(2);
         return new Proxy(this, {
             get: (target, prop) => {
                 // 如果是 ChronikCache 自己的方法或属性，直接返回
@@ -268,7 +271,6 @@ class ChronikCache {
     }
 
     async _checkAndUpdateCache(address, apiNumTxs, pageSize) {
-        // If the total transaction count exceeds maxMemory, abort caching
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[${address}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
@@ -283,28 +285,29 @@ class ChronikCache {
         Promise.resolve().then(async () => {
             try {
                 const cachedData = await this._readCache(address);
-                let dynamicPageSize = pageSize; // Default value if no cache exists
+                let dynamicPageSize = pageSize;
                 if (cachedData && typeof cachedData.numTxs === 'number') {
                     dynamicPageSize = apiNumTxs - cachedData.numTxs;
-                    // Ensure dynamicPageSize is at least 1
                     if (dynamicPageSize < 1) {
                         dynamicPageSize = 1;
                     }
                 }
-
-                // Ensure dynamicPageSize does not exceed 200
                 if (dynamicPageSize > 200) {
                     dynamicPageSize = 200;
                 }
-
                 if (!cachedData || cachedData.numTxs !== apiNumTxs) {
+                    // 将更新任务加入全局队列
                     this.updateLocks.set(address, true);
-                    try {
-                        this.logger.log(`[${address}] Cache needs update, updating with dynamic page size: ${dynamicPageSize}`);
-                        await this._updateCache(address, apiNumTxs, dynamicPageSize);
-                    } finally {
-                        this.updateLocks.delete(address);
-                    }
+                    this.updateQueue.enqueue(async () => {
+                        try {
+                            this.logger.log(`[${address}] Cache needs update, updating with dynamic page size: ${dynamicPageSize}`);
+                            await this._updateCache(address, apiNumTxs, dynamicPageSize);
+                        } finally {
+                            this.updateLocks.delete(address);
+                        }
+                    });
+                    // 显示当前队列中的任务数量
+                    this.logger.log(`[${address}] Current global update queue length: ${this.updateQueue.getQueueLength()}`);
                 } else {
                     this.logger.log(`[${address}] Cache is up to date, setting status to LATEST`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
@@ -620,7 +623,6 @@ class ChronikCache {
     }
 
     async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize) {
-        // 如果 apiNumTxs 超过最大内存限制，则直接退出
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[Token ${tokenId}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
@@ -635,29 +637,29 @@ class ChronikCache {
         Promise.resolve().then(async () => {
             try {
                 const cachedData = await this._readCache(tokenId);
-                let dynamicPageSize = pageSize; // 默认值
-
+                let dynamicPageSize = pageSize;
                 if (cachedData && typeof cachedData.numTxs === 'number') {
                     dynamicPageSize = apiNumTxs - cachedData.numTxs;
-                    // 确保 dynamicPageSize 至少为 1
                     if (dynamicPageSize < 1) {
                         dynamicPageSize = 1;
                     }
                 }
-
-                // 确保 dynamicPageSize 不超过 200
                 if (dynamicPageSize > 200) {
                     dynamicPageSize = 200;
                 }
-
                 if (!cachedData || cachedData.numTxs !== apiNumTxs) {
+                    // 将 token 更新任务加入全局队列
                     this.tokenUpdateLocks.set(tokenId, true);
-                    try {
-                        this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING, dynamicPageSize: ${dynamicPageSize}`);
-                        await this._updateTokenCache(tokenId, apiNumTxs, dynamicPageSize);
-                    } finally {
-                        this.tokenUpdateLocks.delete(tokenId);
-                    }
+                    this.updateQueue.enqueue(async () => {
+                        try {
+                            this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING, dynamic page size: ${dynamicPageSize}`);
+                            await this._updateTokenCache(tokenId, apiNumTxs, dynamicPageSize);
+                        } finally {
+                            this.tokenUpdateLocks.delete(tokenId);
+                        }
+                    });
+                    // 显示当前队列中的任务数量
+                    this.logger.log(`[Token ${tokenId}] Current global update queue length: ${this.updateQueue.getQueueLength()}`);
                 } else {
                     this.logger.log(`[Token ${tokenId}] Cache is up to date, setting status to LATEST`);
                     this._setTokenCacheStatus(tokenId, CACHE_STATUS.LATEST);
