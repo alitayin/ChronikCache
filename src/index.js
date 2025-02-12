@@ -951,14 +951,20 @@ class ChronikCache {
 
     // 修改后的 _updatePageUnconfirmedTxs 方法
     async _updatePageUnconfirmedTxs(address, cache, txsInCurrentPage) {
-        const unconfirmedTxids = txsInCurrentPage
-            .filter(tx => !tx.isFinal)
-            .map(tx => tx.txid);
-
-        if (unconfirmedTxids.length === 0) return;
-
+        // 预处理：修正那些 isFinal 为 false 但实际已有 block.height 的交易
+        const mistakenTxs = txsInCurrentPage.filter(tx => !tx.isFinal && tx.block && tx.block.height);
         let updated = false;
-
+        mistakenTxs.forEach(tx => {
+            cache.txMap[tx.txid].isFinal = true;
+            this.logger.log(`[${address}] Corrected tx ${tx.txid} isFinal to true based on block.height`);
+            updated = true;
+        });
+    
+        // 处理剩余仍为未确认且缺少 block.height 的交易
+        const unconfirmedTxids = txsInCurrentPage
+            .filter(tx => !tx.isFinal && (!tx.block || !tx.block.height))
+            .map(tx => tx.txid);
+    
         for (const txid of unconfirmedTxids) {
             try {
                 const updatedTx = await this.chronik.tx(txid);
@@ -973,12 +979,13 @@ class ChronikCache {
                 this.logger.error(`Error updating tx ${txid} in cache:`, error);
             }
         }
-
+    
+        // 如果有交易更新，则重新排序一遍并写回缓存
         if (updated) {
             cache.txOrder.sort((a, b) => {
                 const txA = cache.txMap[a];
                 const txB = cache.txMap[b];
-
+    
                 if (!txA.isFinal && !txB.isFinal) {
                     return txB.timeFirstSeen - txA.timeFirstSeen;
                 } else if (!txA.isFinal) {
@@ -997,16 +1004,21 @@ class ChronikCache {
 
     // 修改后的 _updatePageUnconfirmedTokenTxs 方法
     async _updatePageUnconfirmedTokenTxs(tokenId, cache, txsInCurrentPage) {
+        // First, update mistakenly unconfirmed transactions that actually have block.height.
+        const mistakenTxs = txsInCurrentPage.filter(tx => !tx.isFinal && tx.block && tx.block.height);
+        let updated = false;
+        mistakenTxs.forEach(tx => {
+            // Correct the isFinal flag in cache since block data exists.
+            cache.txMap[tx.txid].isFinal = true;
+            this.logger.log(`[${tokenId}] Corrected tx ${tx.txid} isFinal to true based on block.height`);
+            updated = true;
+        });
+
+        // Then, process the remaining transactions which are still unconfirmed (and lack block.height).
         const unconfirmedTxids = txsInCurrentPage
-            .filter(tx => !tx.isFinal)
+            .filter(tx => !tx.isFinal && (!tx.block || !tx.block.height))
             .map(tx => tx.txid);
 
-        if (unconfirmedTxids.length === 0) return;
-
-        // 标记是否有交易更新
-        let updated = false;
-
-        // 顺序更新每个 tx
         for (const txid of unconfirmedTxids) {
             try {
                 const updatedTx = await this.chronik.tx(txid);
@@ -1022,12 +1034,12 @@ class ChronikCache {
             }
         }
 
-        // 如果有交易更新，则重新排序一次并一次性写入缓存
+        // If any transaction was updated, re-sort the cache and write it back.
         if (updated) {
             cache.txOrder.sort((a, b) => {
                 const txA = cache.txMap[a];
                 const txB = cache.txMap[b];
-
+    
                 if (!txA.isFinal && !txB.isFinal) {
                     return txB.timeFirstSeen - txA.timeFirstSeen;
                 } else if (!txA.isFinal) {
