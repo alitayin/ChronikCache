@@ -378,9 +378,9 @@ class ChronikCache {
                         } else if (!txB.isFinal) {
                             return 1;
                         } else {
-                            const heightDiff = txB.height - txA.height;
+                            const heightDiff = txB.block.height - txA.block.height;
                             if (heightDiff !== 0) return heightDiff;
-                            return txB.timestamp - txA.timestamp;
+                            return txB.block.timestamp - txA.block.timestamp;
                         }
                     });
                     this.logger.endTimer(`[${address}] Sorting tx order`);
@@ -582,9 +582,9 @@ class ChronikCache {
             } else if (!txB.isFinal) {
                 return 1;
             } else {
-                const heightDiff = txB.height - txA.height;
+                const heightDiff = txB.block.height - txA.block.height;
                 if (heightDiff !== 0) return heightDiff;
-                return txB.timestamp - txA.timestamp;
+                return txB.block.timestamp - txA.block.timestamp;
             }
         });
 
@@ -756,9 +756,9 @@ class ChronikCache {
                         } else if (!txB.isFinal) {
                             return 1;
                         } else {
-                            const heightDiff = txB.height - txA.height;
+                            const heightDiff = txB.block.height - txA.block.height;
                             if (heightDiff !== 0) return heightDiff;
-                            return txB.timestamp - txA.timestamp;
+                            return txB.block.timestamp - txA.block.timestamp;
                         }
                     });
                     this.logger.endTimer(`[${tokenId}] Sorting tx order`);
@@ -933,9 +933,9 @@ class ChronikCache {
                     } else if (!txB.isFinal) {
                         return 1;
                     } else {
-                        const heightDiff = txB.height - txA.height;
+                        const heightDiff = txB.block.height - txA.block.height;
                         if (heightDiff !== 0) return heightDiff;
-                        return txB.timestamp - txA.timestamp;
+                        return txB.block.timestamp - txA.block.timestamp;
                     }
                 });
                 // 异步更新缓存
@@ -986,9 +986,9 @@ class ChronikCache {
                 } else if (!txB.isFinal) {
                     return 1;
                 } else {
-                    const heightDiff = txB.height - txA.height;
+                    const heightDiff = txB.block.height - txA.block.height;
                     if (heightDiff !== 0) return heightDiff;
-                    return txB.timestamp - txA.timestamp;
+                    return txB.block.timestamp - txA.block.timestamp;
                 }
             });
             await this._writeCache(address, cache);
@@ -1035,9 +1035,9 @@ class ChronikCache {
                 } else if (!txB.isFinal) {
                     return 1;
                 } else {
-                    const heightDiff = txB.height - txA.height;
+                    const heightDiff = txB.block.height - txA.block.height;
                     if (heightDiff !== 0) return heightDiff;
-                    return txB.timestamp - txA.timestamp;
+                    return txB.block.timestamp - txA.block.timestamp;
                 }
             });
             await this._writeCache(tokenId, cache);
@@ -1063,9 +1063,9 @@ class ChronikCache {
             } else if (!txB.isFinal) {
                 return 1;
             } else {
-                const heightDiff = txB.height - txA.height;
+                const heightDiff = txB.block.height - txA.block.height;
                 if (heightDiff !== 0) return heightDiff;
-                return txB.timestamp - txA.timestamp;
+                return txB.block.timestamp - txA.block.timestamp;
             }
         });
 
