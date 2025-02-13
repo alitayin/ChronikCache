@@ -7,6 +7,8 @@ const FailoverHandler = require('./lib/failover');
 const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY; 
 const { computeHash } = require('./lib/hash');
 const TaskQueue = require('./lib/TaskQueue');
+// Import external sortTxIds function from lib
+const sortTxIds = require('./lib/sortTxIds');
 
 
 class ChronikCache {
@@ -75,6 +77,7 @@ class ChronikCache {
         });
     }
 
+
     // Read cache from database by reading txMap and txOrder separately
     async _readCache(addressOrTokenId) {
         try {
@@ -132,8 +135,17 @@ class ChronikCache {
         // Use computeHash to generate hash value
         const newHash = computeHash(data.txOrder);
 
-        // 尝试从全局元数据中拿到之前保存的哈希值
+        // Try to get the existing hash from global metadata
         let metadata = await this._getGlobalMetadata(addressOrTokenId, isToken);
+
+        // Log the change of hash values
+        if (metadata && metadata.dataHash) {
+            this.logger.log(`[${addressOrTokenId}] Changing hash from ${metadata.dataHash} to ${newHash}`);
+        } else {
+            this.logger.log(`[${addressOrTokenId}] No previous hash found. Setting new hash: ${newHash}`);
+        }
+
+        // If there is no difference, skip the DB update
         if (metadata && metadata.dataHash && metadata.dataHash === newHash) {
             this.logger.log(`No change detected for ${isToken ? 'token' : 'address'}: ${addressOrTokenId}, skipping DB update.`);
             return;
@@ -162,7 +174,7 @@ class ChronikCache {
             await this.db.put(`${addressOrTokenId}:txOrder`, data.txOrder);
         }
         
-        // 更新全局元数据，包括新生成的哈希值
+        // Update global metadata with the new hash value
         metadata = metadata || { accessCount: 0, createdAt: Date.now() };
         metadata.dataHash = newHash;
         metadata.numTxs = totalTxs;
@@ -270,7 +282,7 @@ class ChronikCache {
         return this.updateLocks.has(address);
     }
 
-    async _checkAndUpdateCache(address, apiNumTxs, pageSize) {
+    async _checkAndUpdateCache(address, apiNumTxs, pageSize, forceUpdate = false) {
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[${address}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setCacheStatus(address, CACHE_STATUS.UNKNOWN);
@@ -295,18 +307,16 @@ class ChronikCache {
                 if (dynamicPageSize > 200) {
                     dynamicPageSize = 200;
                 }
-                if (!cachedData || cachedData.numTxs !== apiNumTxs) {
-                    // 将更新任务加入全局队列
+                if (!cachedData || cachedData.numTxs !== apiNumTxs || forceUpdate) {
                     this.updateLocks.set(address, true);
                     this.updateQueue.enqueue(async () => {
                         try {
-                            this.logger.log(`[${address}] Cache needs update, updating with dynamic page size: ${dynamicPageSize}`);
+                            this.logger.log(`[${address}] Cache needs update${forceUpdate ? ' (forced update)' : ''}, updating with dynamic page size: ${dynamicPageSize}`);
                             await this._updateCache(address, apiNumTxs, dynamicPageSize);
                         } finally {
                             this.updateLocks.delete(address);
                         }
                     });
-                    // 显示当前队列中的任务数量
                     this.logger.log(`[${address}] Current global update queue length: ${this.updateQueue.getQueueLength()}`);
                 } else {
                     this.logger.log(`[${address}] Cache is up to date, setting status to LATEST`);
@@ -341,15 +351,20 @@ class ChronikCache {
                     this.logger.log(`[${address}] Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
                     
                     if (currentSize >= totalNumTxs) {
-                        if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
-                            this.logger.startTimer(`[${address}] Final write cache`);
-                            const updatedData = {
-                                txMap: Object.fromEntries(localTxMap),
-                                txOrder: localTxOrder,
-                            };
-                            await this._writeCache(address, updatedData);
-                            this.logger.endTimer(`[${address}] Final write cache`);
-                        }
+                        // Final sorting of txOrder before final cache write using the helper
+                        this.logger.startTimer(`[${address}] Final sorting tx order`);
+                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
+                        this.logger.endTimer(`[${address}] Final sorting tx order`);
+
+                        // Always write the final state into the cache
+                        this.logger.startTimer(`[${address}] Final write cache`);
+                        const updatedData = {
+                            txMap: Object.fromEntries(localTxMap),
+                            txOrder: localTxOrder,
+                        };
+                        await this._writeCache(address, updatedData);
+                        this.logger.endTimer(`[${address}] Final write cache`);
+
                         this.logger.log(`[${address}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
@@ -367,22 +382,8 @@ class ChronikCache {
                     this.logger.endTimer(`[${address}] Process tx`);
             
                     this.logger.startTimer(`[${address}] Sorting tx order`);
-                    localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
-                        const txA = localTxMap.get(a);
-                        const txB = localTxMap.get(b);
-                        
-                        if (!txA.isFinal && !txB.isFinal) {
-                            return txB.timeFirstSeen - txA.timeFirstSeen;
-                        } else if (!txA.isFinal) {
-                            return -1;
-                        } else if (!txB.isFinal) {
-                            return 1;
-                        } else {
-                            const heightDiff = txB.block.height - txA.block.height;
-                            if (heightDiff !== 0) return heightDiff;
-                            return txB.block.timestamp - txA.block.timestamp;
-                        }
-                    });
+                    // Use helper function to sort txOrder
+                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
                     this.logger.endTimer(`[${address}] Sorting tx order`);
             
                     if (localTxMap.size >= 20000) {
@@ -411,7 +412,7 @@ class ChronikCache {
                     iterationCount++;
                 }
                 
-                // 主动释放内存
+                // Clean up memory after cache update.
                 this.logger.log(`[${address}] Cleaning up memory used for cache update.`);
                 localTxMap.clear();
                 localTxOrder = null;
@@ -420,7 +421,6 @@ class ChronikCache {
                 if (currentStatus !== CACHE_STATUS.LATEST) {
                     this.logger.log(`[${address}] Cache update complete, setting status to LATEST.`);
                     this._setCacheStatus(address, CACHE_STATUS.LATEST);
-            
                     await this._initWebsocketForAddress(address);
                 } else {
                     this.logger.log(`[${address}] Cache update complete, maintaining LATEST status.`);
@@ -571,36 +571,23 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(address);
         if (!metadata) return null;
 
-        // 对缓存中的交易顺序进行排序
-        cache.txOrder.sort((a, b) => {
-            const txA = cache.txMap[a];
-            const txB = cache.txMap[b];
-            if (!txA.isFinal && !txB.isFinal) {
-                return txB.timeFirstSeen - txA.timeFirstSeen;
-            } else if (!txA.isFinal) {
-                return -1;
-            } else if (!txB.isFinal) {
-                return 1;
-            } else {
-                const heightDiff = txB.block.height - txA.block.height;
-                if (heightDiff !== 0) return heightDiff;
-                return txB.block.timestamp - txA.block.timestamp;
-            }
-        });
+        // Sort transaction order using the helper function.
+        cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
 
-        // 计算排序后的新 hash
+        // Compute new hash and check metadata...
         const newHash = computeHash(cache.txOrder);
-        // 如果 hash 与元数据记录的不一致，则触发更新
+        // Log new hash and stored hash values
+        this.logger.log(`[${address}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
         if (newHash !== metadata.dataHash) {
             this.logger.log(`[${address}] Cache order hash mismatch detected. Triggering cache update.`);
-            this._checkAndUpdateCache(address, metadata.numTxs, this.defaultPageSize);
+            this._checkAndUpdateCache(address, metadata.numTxs, this.defaultPageSize, true);
         }
 
         const start = pageOffset * pageSize;
         const end = start + pageSize;
         const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
-        // 对当前页的未确认交易尝试进行更新
+        // Update unconfirmed transactions in the current page.
         this._updatePageUnconfirmedTxs(address, cache, txs);
 
         return {
@@ -647,7 +634,8 @@ class ChronikCache {
         return this.tokenUpdateLocks.has(tokenId);
     }
 
-    async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize) {
+    async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize, forceUpdate = false) {
+        // Check if number of transactions exceeds the memory limit
         if (apiNumTxs > this.maxMemory) {
             this.logger.log(`[Token ${tokenId}] Transaction count (${apiNumTxs}) exceeds maxMemory limit (${this.maxMemory}), skipping cache`);
             this._setTokenCacheStatus(tokenId, CACHE_STATUS.UNKNOWN);
@@ -672,18 +660,17 @@ class ChronikCache {
                 if (dynamicPageSize > 200) {
                     dynamicPageSize = 200;
                 }
-                if (!cachedData || cachedData.numTxs !== apiNumTxs) {
-                    // 将 token 更新任务加入全局队列
+                // 如果缓存不存在、交易数量不一致，或者强制更新（forceUpdate）为 true 时，则进行更新
+                if (!cachedData || cachedData.numTxs !== apiNumTxs || forceUpdate) {
                     this.tokenUpdateLocks.set(tokenId, true);
                     this.updateQueue.enqueue(async () => {
                         try {
-                            this.logger.log(`[Token ${tokenId}] Cache needs update, changing status to UPDATING, dynamic page size: ${dynamicPageSize}`);
+                            this.logger.log(`[Token ${tokenId}] Cache needs update${forceUpdate ? ' (forced update)' : ''}, dynamic page size: ${dynamicPageSize}`);
                             await this._updateTokenCache(tokenId, apiNumTxs, dynamicPageSize);
                         } finally {
                             this.tokenUpdateLocks.delete(tokenId);
                         }
                     });
-                    // 显示当前队列中的任务数量
                     this.logger.log(`[Token ${tokenId}] Current global update queue length: ${this.updateQueue.getQueueLength()}`);
                 } else {
                     this.logger.log(`[Token ${tokenId}] Cache is up to date, setting status to LATEST`);
@@ -719,15 +706,20 @@ class ChronikCache {
                     this.logger.log(`[${tokenId}] Updating cache page ${currentPage}, current size: ${currentSize}/${totalNumTxs}`);
         
                     if (currentSize >= totalNumTxs) {
-                        if (localTxMap.size >= 20000 && iterationCount % 10 !== 0) {
-                            this.logger.startTimer(`[${tokenId}] Final write cache`);
-                            const updatedData = {
-                                txMap: Object.fromEntries(localTxMap),
-                                txOrder: localTxOrder,
-                            };
-                            await this._writeCache(tokenId, updatedData, true);
-                            this.logger.endTimer(`[${tokenId}] Final write cache`);
-                        }
+                        // Re-sort the txOrder before final cache write
+                        this.logger.startTimer(`[${tokenId}] Final sorting tx order`);
+                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
+                        this.logger.endTimer(`[${tokenId}] Final sorting tx order`);
+                        
+                        // Always write the final state into the cache
+                        this.logger.startTimer(`[${tokenId}] Final write cache`);
+                        const updatedData = {
+                            txMap: Object.fromEntries(localTxMap),
+                            txOrder: localTxOrder,
+                        };
+                        await this._writeCache(tokenId, updatedData, true);
+                        this.logger.endTimer(`[${tokenId}] Final write cache`);
+                        
                         this.logger.log(`[${tokenId}] Cache update completed, final size: ${currentSize}`);
                         break;
                     }
@@ -745,22 +737,7 @@ class ChronikCache {
                     this.logger.endTimer(`[${tokenId}] Process tx`);
         
                     this.logger.startTimer(`[${tokenId}] Sorting tx order`);
-                    localTxOrder = Array.from(localTxMap.keys()).sort((a, b) => {
-                        const txA = localTxMap.get(a);
-                        const txB = localTxMap.get(b);
-                        
-                        if (!txA.isFinal && !txB.isFinal) {
-                            return txB.timeFirstSeen - txA.timeFirstSeen;
-                        } else if (!txA.isFinal) {
-                            return -1;
-                        } else if (!txB.isFinal) {
-                            return 1;
-                        } else {
-                            const heightDiff = txB.block.height - txA.block.height;
-                            if (heightDiff !== 0) return heightDiff;
-                            return txB.block.timestamp - txA.block.timestamp;
-                        }
-                    });
+                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
                     this.logger.endTimer(`[${tokenId}] Sorting tx order`);
         
                     if (localTxMap.size >= 20000) {
@@ -922,22 +899,7 @@ class ChronikCache {
             if (cache.txMap[txid]) {
                 cache.txMap[txid] = updatedTx;
                 // 重新排序 txOrder（因为交易状态已更新）
-                cache.txOrder.sort((a, b) => {
-                    const txA = cache.txMap[a];
-                    const txB = cache.txMap[b];
-                    
-                    if (!txA.isFinal && !txB.isFinal) {
-                        return txB.timeFirstSeen - txA.timeFirstSeen;
-                    } else if (!txA.isFinal) {
-                        return -1;
-                    } else if (!txB.isFinal) {
-                        return 1;
-                    } else {
-                        const heightDiff = txB.block.height - txA.block.height;
-                        if (heightDiff !== 0) return heightDiff;
-                        return txB.block.timestamp - txA.block.timestamp;
-                    }
-                });
+                cache.txOrder = sortTxIds(Array.from(cache.txMap.keys()), key => cache.txMap[key]);
                 // 异步更新缓存
                 this._writeCache(addressOrTokenId, cache);
                 this.logger.log(`[${addressOrTokenId}] Updated tx ${txid} in cache`);
@@ -951,7 +913,7 @@ class ChronikCache {
 
     // 修改后的 _updatePageUnconfirmedTxs 方法
     async _updatePageUnconfirmedTxs(address, cache, txsInCurrentPage) {
-        // 预处理：修正那些 isFinal 为 false 但实际已有 block.height 的交易
+        // Correct mistaken unconfirmed transactions based on block.height.
         const mistakenTxs = txsInCurrentPage.filter(tx => !tx.isFinal && tx.block && tx.block.height);
         let updated = false;
         mistakenTxs.forEach(tx => {
@@ -960,7 +922,7 @@ class ChronikCache {
             updated = true;
         });
     
-        // 处理剩余仍为未确认且缺少 block.height 的交易
+        // Process remaining unconfirmed transactions.
         const unconfirmedTxids = txsInCurrentPage
             .filter(tx => !tx.isFinal && (!tx.block || !tx.block.height))
             .map(tx => tx.txid);
@@ -980,24 +942,9 @@ class ChronikCache {
             }
         }
     
-        // 如果有交易更新，则重新排序一遍并写回缓存
+        // If any transaction updated, resort and write back cache.
         if (updated) {
-            cache.txOrder.sort((a, b) => {
-                const txA = cache.txMap[a];
-                const txB = cache.txMap[b];
-    
-                if (!txA.isFinal && !txB.isFinal) {
-                    return txB.timeFirstSeen - txA.timeFirstSeen;
-                } else if (!txA.isFinal) {
-                    return -1;
-                } else if (!txB.isFinal) {
-                    return 1;
-                } else {
-                    const heightDiff = txB.block.height - txA.block.height;
-                    if (heightDiff !== 0) return heightDiff;
-                    return txB.block.timestamp - txA.block.timestamp;
-                }
-            });
+            cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
             await this._writeCache(address, cache);
         }
     }
@@ -1036,22 +983,7 @@ class ChronikCache {
 
         // If any transaction was updated, re-sort the cache and write it back.
         if (updated) {
-            cache.txOrder.sort((a, b) => {
-                const txA = cache.txMap[a];
-                const txB = cache.txMap[b];
-    
-                if (!txA.isFinal && !txB.isFinal) {
-                    return txB.timeFirstSeen - txA.timeFirstSeen;
-                } else if (!txA.isFinal) {
-                    return -1;
-                } else if (!txB.isFinal) {
-                    return 1;
-                } else {
-                    const heightDiff = txB.block.height - txA.block.height;
-                    if (heightDiff !== 0) return heightDiff;
-                    return txB.block.timestamp - txA.block.timestamp;
-                }
-            });
+            cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
             await this._writeCache(tokenId, cache);
         }
     }
@@ -1064,35 +996,23 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(tokenId, true);
         if (!metadata) return null;
 
-        // 对 token 缓存中的交易顺序进行排序
-        cache.txOrder.sort((a, b) => {
-            const txA = cache.txMap[a];
-            const txB = cache.txMap[b];
-            if (!txA.isFinal && !txB.isFinal) {
-                return txB.timeFirstSeen - txA.timeFirstSeen;
-            } else if (!txA.isFinal) {
-                return -1;
-            } else if (!txB.isFinal) {
-                return 1;
-            } else {
-                const heightDiff = txB.block.height - txA.block.height;
-                if (heightDiff !== 0) return heightDiff;
-                return txB.block.timestamp - txA.block.timestamp;
-            }
-        });
+        // Sort transaction order using the helper function.
+        cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
 
-        // 计算新的哈希值并进行比对
+        // Compute new hash and check metadata...
         const newHash = computeHash(cache.txOrder);
+        // Log new hash and stored hash values
+        this.logger.log(`[${tokenId}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
         if (newHash !== metadata.dataHash) {
-            this.logger.log(`[${tokenId}] Token cache order hash mismatch detected. Triggering token cache update.`);
-            this._checkAndUpdateTokenCache(tokenId, metadata.numTxs, this.defaultPageSize);
+            this.logger.log(`[${tokenId}] Token cache order hash mismatch detected. Forcing cache update.`);
+            this._checkAndUpdateTokenCache(tokenId, metadata.numTxs, this.defaultPageSize, true);
         }
 
         const start = pageOffset * pageSize;
         const end = start + pageSize;
         const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
-        // 更新当前页中未确认的 token 交易
+        // Update unconfirmed transactions in the current page.
         this._updatePageUnconfirmedTokenTxs(tokenId, cache, txs);
 
         return {
