@@ -61,7 +61,9 @@ class DbUtils {
         return await this.failover.handleDbOperation(
             async () => {
                 let totalSize = 0;
-                for await (const [_, value] of this.db.iterator()) {
+                for await (const [key, value] of this.db.iterator()) {
+                    // 同时计算key和value的字节大小
+                    totalSize += Buffer.byteLength(key, 'utf8');
                     totalSize += Buffer.byteLength(JSON.stringify(value), 'utf8');
                 }
                 return totalSize;

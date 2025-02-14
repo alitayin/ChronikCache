@@ -1,4 +1,4 @@
-# ChronikCache V0.9.6
+# ChronikCache V1.0.0
 
 ChronikCache is an npm package that provides a caching layer for Chronik.  
 
@@ -14,10 +14,11 @@ ChronikCache is an npm package that provides a caching layer for Chronik.
 - Local LevelDB-based caching of transaction histories.  
 - Automatic cache updates when Chronik indicates new transactions.  
 - WebSocket management with configurable timeout settings and caching failover/retry logic.  
-- Flexible configuration for cache size, memory limit, page sizing, and WebSocket timeouts.  
+- Flexible configuration for cache size, transaction limit, page sizing, and WebSocket timeouts.  
 - Script-to-address conversion (using [ecashaddrjs](https://www.npmjs.com/package/ecashaddrjs)).  
 - Simple, fluent interface for fetching transaction history.  
 - Token transaction history caching support.
+- Additional utility methods like cache statistics retrieval.
 
 ---
 
@@ -38,16 +39,37 @@ const Chronik = require('chronik-client'); // Hypothetical Chronik client
 const ChronikCache = require('chronik-cache');
 
 const chronikCache = new ChronikCache(chronik, {
-  maxMemory: 50000,                     // Maximum number of transactions to cache in memory
+  maxTxLimit: 50000,                     // Maximum allowed transaction count before rejecting cache update
   maxCacheSize: 1024,                    // Maximum disk size in MB for the local cache
-  failoverOptions: {                    // Options for the internal FailoverHandler
+  failoverOptions: {                     // Options for the internal FailoverHandler
     retryAttempts: 3,
     retryDelayMs: 1500
   },
   wsTimeout: 86000000,                     // WebSocket timeout in milliseconds
   wsExtendTimeout: 43000000,              // Extended WebSocket timeout in milliseconds
-  enableLogging: false
+  enableLogging: false,                   // Disable Logging
+    enableTimer: false                   // Disable Logging-Timer
 });
+
+// Example of retrieving address history
+(async () => {
+  const address = 'ecash:qq...'; // Replace with a valid address
+  const history = await chronikCache.address(address).history(0, 200);
+  console.log('Address History:', history);
+})();
+
+// Example of retrieving token history
+(async () => {
+  const tokenId = 'tokenId...'; // Replace with a valid tokenId
+  const history = await chronikCache.tokenId(tokenId).history(0, 200);
+  console.log('Token History:', history);
+})();
+
+// Example of retrieving cache statistics
+(async () => {
+  const stats = await chronikCache.getStatistics();
+  console.log('Cache Statistics:', stats);
+})();
 ```
 
 ---
@@ -105,10 +127,19 @@ ChronikCache provides the following methods to manage cache for addresses and to
      - `UNKNOWN`: The cache status is unknown or uninitialized.
      - `UPDATING`: The cache is currently being updated.
      - `LATEST`: The cache is up to date.
+     - `REJECT`: The transaction count exceeds the allowed limit.
    - Example:
      ```js
      const status = chronikCache.getCacheStatus('ecash:qq...');
      console.log(`Cache status: ${status}`);
+     ```
+
+5. **getStatistics()**
+   - Retrieves statistics and performance metrics related to the cache.
+   - Example:
+     ```js
+     const stats = await chronikCache.getStatistics();
+     console.log('Cache Statistics:', stats);
      ```
 
 ---
