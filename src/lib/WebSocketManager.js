@@ -5,7 +5,9 @@ const { DEFAULT_CONFIG } = require('../constants');
 class WebSocketManager {
     constructor(chronik, failoverOptions = {}, enableLogging = false, {
         wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
-        wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
+        wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT,
+        maxWsConnections = 30,
+        onEvict = null
     } = {}) {
         this.chronik = chronik;
         this.wsSubscriptions = new Map();
@@ -15,6 +17,8 @@ class WebSocketManager {
         this.logger = new Logger(enableLogging);
         this.wsTimeout = wsTimeout;
         this.wsExtendTimeout = wsExtendTimeout;
+        this.maxWsConnections = maxWsConnections;
+        this.onEvict = onEvict;
     }
 
     async initWebsocketForAddress(address, onNewTransaction) {
@@ -24,6 +28,11 @@ class WebSocketManager {
                     this.logger.log(`[WS] Address ${address} is already subscribed.`);
                     this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
                     return;
+                }
+
+                // Evict oldest subscription if connection limit is reached
+                while (this.wsSubscriptions.size >= this.maxWsConnections) {
+                    this._evictOldestWs();
                 }
 
                 const ws = this.chronik.ws({
@@ -76,6 +85,11 @@ class WebSocketManager {
                     this.logger.log(`[WS] Token ${tokenId} is already subscribed.`);
                     this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
                     return;
+                }
+
+                // Evict oldest subscription if connection limit is reached
+                while (this.wsSubscriptions.size >= this.maxWsConnections) {
+                    this._evictOldestWs();
                 }
 
                 const ws = this.chronik.ws({
@@ -185,6 +199,26 @@ class WebSocketManager {
         }
         const remainSec = Math.round(remainMs / 1000);
         return { active: true, remainingSec: remainSec };
+    }
+
+    _evictOldestWs() {
+        const oldestKey = this.wsSubscriptions.keys().next().value;
+        if (!oldestKey) return;
+        const ws = this.wsSubscriptions.get(oldestKey);
+        if (ws) {
+            if (ws.subscriptionType === 'address') {
+                ws.unsubscribeFromAddress(oldestKey);
+            } else if (ws.subscriptionType === 'token') {
+                ws.unsubscribeFromTokenId(oldestKey);
+            } else {
+                ws.unsubscribeFromAddress(oldestKey);
+            }
+            this.wsSubscriptions.delete(oldestKey);
+            this.logger.log(`[WS] Evicted oldest subscription with key: ${oldestKey}`);
+            if (this.onEvict && typeof this.onEvict === 'function') {
+                this.onEvict(oldestKey, ws.subscriptionType);
+            }
+        }
     }
 }
 
