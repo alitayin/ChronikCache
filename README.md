@@ -1,4 +1,4 @@
-# ChronikCache V1.0.2
+# ChronikCache V1.0.3
 
 ChronikCache is an npm package that provides a caching layer for Chronik.  
 
@@ -141,6 +141,24 @@ ChronikCache provides the following methods to manage cache for addresses and to
      const stats = await chronikCache.getStatistics();
      console.log('Cache Statistics:', stats);
      ```
+
+---
+
+## Cache Return Status
+
+The returned data contains a `status` field that indicates the state and source of the data. The meanings are as follows:
+
+- **Status 1 – Cache In Preparation**  
+  **Description:**  
+  When a user requests more than 200 transactions and the cache is still being built, the system returns status 1. No actual transaction data is provided in this response; instead, a message is given indicating that the cache is being prepared.
+
+- **Status 2 – Cache Limit Exceeded**  
+  **Description:**  
+  When the transaction count for an address or token exceeds the configured `maxTxLimit`, the cache update is rejected. In this scenario, data is fetched directly from the Chronik API and the response includes status 2, which informs the user that the cache was bypassed due to exceeding the limit.
+
+- **Status 3 – Direct API Fallback**  
+  **Description:**  
+  In other cases—such as when a non-cached method is called or during fallback scenarios—the system returns data directly from the Chronik API with status 3. This status indicates that the data does not originate from the cache or that the cache status is not applicable.
 
 ---
 

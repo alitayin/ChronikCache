@@ -1007,14 +1007,7 @@ class ChronikCache {
     // 合并后的通用方法
     async _updatePageUnconfirmedTxs(identifier, cache, txsInCurrentPage, isToken = false) {
         const idType = isToken ? 'token' : 'address';
-        const mistakenTxs = txsInCurrentPage.filter(tx => !tx.isFinal && tx.block && tx.block.height);
         let updated = false;
-        
-        mistakenTxs.forEach(tx => {
-            cache.txMap[tx.txid].isFinal = true;
-            this.logger.log(`[${idType} ${identifier}] Corrected tx ${tx.txid} isFinal to true based on block.height`);
-            updated = true;
-        });
 
         const unconfirmedTxids = txsInCurrentPage
             .filter(tx => !tx.isFinal && (!tx.block || !tx.block.height))
