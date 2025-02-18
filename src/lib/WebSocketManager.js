@@ -25,8 +25,7 @@ class WebSocketManager {
         return await this.failover.handleWebSocketOperation(
             async () => {
                 if (this.wsSubscriptions.has(address)) {
-                    this.logger.log(`[WS] Address ${address} is already subscribed.`);
-                    this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                    this.logger.log(`[WS] Address ${address} is already subscribed. Current subscription count: ${this.wsSubscriptions.size}`);
                     return;
                 }
 
@@ -50,7 +49,7 @@ class WebSocketManager {
                         }
                     },
                     onConnect: () => {
-                        this.logger.log(`[WS] Connected for ${address}`);
+                        // Connection log removed.
                     },
                     onReconnect: () => {
                         this.logger.log(`[WS] Reconnected for ${address}`);
@@ -70,8 +69,7 @@ class WebSocketManager {
                 ws.subscribeToAddress(address);
                 ws.subscriptionType = 'address';
                 this.wsSubscriptions.set(address, ws);
-                this.logger.log(`[WS] Successfully subscribed to ${address}`);
-                this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                this.logger.log(`[WS] ✅ Subscribed  to ${address}. Current WS: ${this.wsSubscriptions.size}`);
             },
             address,
             'WebSocket initialization'
@@ -82,8 +80,7 @@ class WebSocketManager {
         return await this.failover.handleWebSocketOperation(
             async () => {
                 if (this.wsSubscriptions.has(tokenId)) {
-                    this.logger.log(`[WS] Token ${tokenId} is already subscribed.`);
-                    this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                    this.logger.log(`[WS] Token ${tokenId} is already subscribed. Current subscription count: ${this.wsSubscriptions.size}`);
                     return;
                 }
 
@@ -107,7 +104,7 @@ class WebSocketManager {
                         }
                     },
                     onConnect: () => {
-                        this.logger.log(`[WS] Connected for Token ${tokenId}`);
+                        // Connection log removed.
                         ws.subscribeToTokenId(tokenId);
                     },
                     onReconnect: () => {
@@ -128,8 +125,7 @@ class WebSocketManager {
                 ws.subscribeToTokenId(tokenId);
                 ws.subscriptionType = 'token';
                 this.wsSubscriptions.set(tokenId, ws);
-                this.logger.log(`[WS] Successfully subscribed to Token ${tokenId}`);
-                this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                this.logger.log(`[WS] ✅ Subscribed to Token ${tokenId}. Current subscription count: ${this.wsSubscriptions.size}`);
             },
             tokenId,
             'WebSocket initialization'
@@ -141,8 +137,7 @@ class WebSocketManager {
         if (ws) {
             ws.unsubscribeFromAddress(address);
             this.wsSubscriptions.delete(address);
-            this.logger.log(`[WS] Unsubscribed from ${address}`);
-            this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+            this.logger.log(`[WS] Unsubscribed from ${address}. Current subscription count: ${this.wsSubscriptions.size}`);
         }
     }
 
@@ -177,13 +172,16 @@ class WebSocketManager {
         this.wsTimeoutExpirations.set(address, newExpirationTime);
 
         const timeoutDuration = newExpirationTime - currentTime;
+        const MAX_SET_TIMEOUT = 1296000000; // Maximum allowed timeout duration (15 days) in ms
+        const effectiveTimeoutDuration = Math.min(timeoutDuration, MAX_SET_TIMEOUT);
+
         const timeout = setTimeout(() => {
             this.unsubscribeAddress(address);
             this.wsTimeouts.delete(address);
             this.wsTimeoutExpirations.delete(address);
             if (onTimeout) onTimeout(address);
-            this.logger.log(`WebSocket for ${address} closed after ${Math.round(timeoutDuration / 1000)}s`);
-        }, timeoutDuration);
+            this.logger.log(`WebSocket for ${address} closed after ${Math.round(effectiveTimeoutDuration / 1000)}s`);
+        }, effectiveTimeoutDuration);
 
         this.wsTimeouts.set(address, timeout);
     }

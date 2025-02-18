@@ -20,7 +20,6 @@ class Logger {
     startTimer(label) {
         if (!this.enableTimer) return;
         this.timers.set(label, process.hrtime());
-        this.log(`${label} timer started`);
     }
 
     endTimer(label) {

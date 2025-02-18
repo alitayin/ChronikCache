@@ -586,9 +586,9 @@ class ChronikCache {
                 
                 const wsTimeInfo = this.wsManager.getRemainingTime(address);
                 if (wsTimeInfo.active) {
-                    this.logger.log(`[${address}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                    // this.logger.log(`[${address}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
                 } else {
-                    this.logger.log(`[${address}] ${wsTimeInfo.message}`);
+                    // this.logger.log(`[${address}] ${wsTimeInfo.message}`);
                     if (currentStatus === CACHE_STATUS.LATEST) {
                         this._initWebsocketForAddress(address);
                     }
@@ -645,15 +645,15 @@ class ChronikCache {
         const now = Date.now();
 
         if (cacheEntry) {
-            // 如果已过期，则从内存中移除，返回 null
+            // Check if entry expired
             if (now > cacheEntry.expiry) {
                 this.logger.log(`[${address}] In-memory cache entry expired`);
                 this.addressMemoryCache.delete(address);
                 cacheEntry = null;
             } else {
-                // 未过期，延长该条目的过期时间10秒
+                // Use memory cache
                 cacheEntry.expiry += 10 * 1000;
-                this.logger.log(`[${address}] In-memory cache hit, extending expiry by 10 seconds`);
+                this.logger.log(`[${address}] Use memory cache`);
             }
         }
 
@@ -665,7 +665,7 @@ class ChronikCache {
             cache = await this._readCache(address);
             this.logger.endTimer(`[${address}] Read persistent cache from DB`);
             if (!cache) return null;
-            // 初次放入内存：设定初始过期时间为120秒
+            // Initial memory cache expiry time: 120 seconds
             this.addressMemoryCache.set(address, {
                 data: cache,
                 expiry: now + 120 * 1000
@@ -675,21 +675,20 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(address);
         if (!metadata) return null;
 
-        // 保证 txOrder 排序
+        // Ensure txOrder is sorted
         cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
 
         // With 50% probability, compute hash and check consistency
         if (Math.random() < 0.5) {
             const newHash = computeHash(cache.txOrder);
-            this.logger.log(`[${address}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
+            // Only output log when hash is changed
             if (newHash !== metadata.dataHash) {
+                this.logger.log(`[${address}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
                 this.logger.log(`[${address}] Cache order hash mismatch detected. Triggering cache update and invalidating in-memory cache.`);
                 this._checkAndUpdateCache(address, metadata.numTxs, this.defaultPageSize, true);
                 // Invalidate the in-memory cache since data is stale
                 this._resetMemoryCache(address, false);
             }
-        } else {
-            this.logger.log(`[${address}] Skipped hash computation check.`);
         }
 
         const start = pageOffset * pageSize;
@@ -896,9 +895,9 @@ class ChronikCache {
                 // 检查 WebSocket 定时器状态
                 const wsTimeInfo = this.wsManager.getRemainingTime(tokenId);
                 if (wsTimeInfo.active) {
-                    this.logger.log(`[Token ${tokenId}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                    // this.logger.log(`[Token ${tokenId}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
                 } else {
-                    this.logger.log(`[Token ${tokenId}] ${wsTimeInfo.message}`);
+                    // this.logger.log(`[Token ${tokenId}] ${wsTimeInfo.message}`);
                     if (currentStatus === CACHE_STATUS.LATEST) {
                         this._initWebsocketForToken(tokenId).catch(err => this.logger.error(err));
                     }
@@ -1050,9 +1049,9 @@ class ChronikCache {
                 this.tokenMemoryCache.delete(tokenId);
                 cacheEntry = null;
             } else {
-                // 每次访问延长该条目的过期时间10秒
+                // Use memory cache
                 cacheEntry.expiry += 10 * 1000;
-                this.logger.log(`[${tokenId}] In-memory token cache hit, extending expiry by 10 seconds`);
+                this.logger.log(`[${tokenId}] Use memory cache`);
             }
         }
 
@@ -1064,7 +1063,7 @@ class ChronikCache {
             cache = await this._readCache(tokenId);
             this.logger.endTimer(`[${tokenId}] Read persistent cache from DB`);
             if (!cache) return null;
-            // 初次放入内存：设定初始过期时间为120秒
+            // Initial memory cache expiry time: 120 seconds
             this.tokenMemoryCache.set(tokenId, {
                 data: cache,
                 expiry: now + 120 * 1000
@@ -1079,15 +1078,14 @@ class ChronikCache {
         // With 50% probability, compute hash and check consistency
         if (Math.random() < 0.5) {
             const newHash = computeHash(cache.txOrder);
-            this.logger.log(`[${tokenId}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
+            // Only output log when hash is changed
             if (newHash !== metadata.dataHash) {
-                this.logger.log(`[${tokenId}] Token cache order hash mismatch detected. Forcing cache update and invalidating in-memory cache.`);
+                this.logger.log(`[${tokenId}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
+                this.logger.log(`[${tokenId}] Cache order hash mismatch detected. Triggering cache update and invalidating in-memory cache.`);
                 this._checkAndUpdateTokenCache(tokenId, metadata.numTxs, this.defaultPageSize, true);
                 // Invalidate the in-memory cache since data is stale
                 this._resetMemoryCache(tokenId, true);
             }
-        } else {
-            this.logger.log(`[${tokenId}] Skipped hash computation check.`);
         }
 
         const start = pageOffset * pageSize;
