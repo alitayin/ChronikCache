@@ -156,34 +156,41 @@ class WebSocketManager {
         this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
     }
 
-    resetWsTimer(address, onTimeout) {
-        const existingTimeout = this.wsTimeouts.get(address);
+    resetWsTimer(identifier, { isToken = false } = {}, onTimeout = null) {
+        const existingTimeout = this.wsTimeouts.get(identifier);
         const currentTime = Date.now();
         
         let newExpirationTime;
         if (existingTimeout) {
-            const currentExpiration = this.wsTimeoutExpirations.get(address);
+            const currentExpiration = this.wsTimeoutExpirations.get(identifier);
             newExpirationTime = currentExpiration + this.wsExtendTimeout;
             clearTimeout(existingTimeout);
         } else {
             newExpirationTime = currentTime + this.wsTimeout;
         }
-
-        this.wsTimeoutExpirations.set(address, newExpirationTime);
-
+    
+        this.wsTimeoutExpirations.set(identifier, newExpirationTime);
+    
         const timeoutDuration = newExpirationTime - currentTime;
-        const MAX_SET_TIMEOUT = 1296000000; // Maximum allowed timeout duration (15 days) in ms
+        const MAX_SET_TIMEOUT = 1296000000; // 15天的最大超时时间（毫秒）
         const effectiveTimeoutDuration = Math.min(timeoutDuration, MAX_SET_TIMEOUT);
-
+    
         const timeout = setTimeout(() => {
-            this.unsubscribeAddress(address);
-            this.wsTimeouts.delete(address);
-            this.wsTimeoutExpirations.delete(address);
-            if (onTimeout) onTimeout(address);
-            this.logger.log(`WebSocket for ${address} closed after ${Math.round(effectiveTimeoutDuration / 1000)}s`);
+            const ws = this.wsSubscriptions.get(identifier);
+            if (ws) {
+                if (isToken) {
+                    this.unsubscribeToken(identifier);
+                } else {
+                    this.unsubscribeAddress(identifier);
+                }
+            }
+            this.wsTimeouts.delete(identifier);
+            this.wsTimeoutExpirations.delete(identifier);
+            if (onTimeout) onTimeout(identifier);
+            this.logger.log(`WebSocket for ${isToken ? 'Token ' : ''}${identifier} closed after ${Math.round(effectiveTimeoutDuration / 1000)}s`);
         }, effectiveTimeoutDuration);
-
-        this.wsTimeouts.set(address, timeout);
+    
+        this.wsTimeouts.set(identifier, timeout);
     }
 
     getRemainingTime(address) {
@@ -212,10 +219,20 @@ class WebSocketManager {
                 ws.unsubscribeFromAddress(oldestKey);
             }
             this.wsSubscriptions.delete(oldestKey);
-            this.logger.log(`[WS] Evicted oldest subscription with key: ${oldestKey}`);
+            this.logger.log(`[WS] Evicted oldest subscription with key: ${oldestKey}. Current subscription count: ${this.wsSubscriptions.size}`);
             if (this.onEvict && typeof this.onEvict === 'function') {
                 this.onEvict(oldestKey, ws.subscriptionType);
             }
+        }
+    }
+
+    unsubscribeToken(tokenId) {
+        const ws = this.wsSubscriptions.get(tokenId);
+        if (ws) {
+            // Cancel token subscription
+            ws.unsubscribeFromTokenId(tokenId);
+            this.wsSubscriptions.delete(tokenId);
+            this.logger.log(`[WS] Unsubscribed from token ${tokenId}. Current subscription count: ${this.wsSubscriptions.size}`);
         }
     }
 }

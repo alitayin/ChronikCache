@@ -250,10 +250,8 @@ class ChronikCache {
     async _initWebsocketForAddress(address) {
         try {
             return await this.failover.handleWebSocketOperation(async () => {
-                this.wsManager.resetWsTimer(address, (addr) => {
-                    // Set status to UNKNOWN on websocket reset
+                this.wsManager.resetWsTimer(address, { isToken: false }, (addr) => {
                     this._setCacheStatus(addr, CACHE_STATUS.UNKNOWN);
-                    // Clear in-memory cache
                     this._resetMemoryCache(addr, false);
                 });
 
@@ -277,10 +275,8 @@ class ChronikCache {
     async _initWebsocketForToken(tokenId) {
         try {
             return await this.failover.handleWebSocketOperation(async () => {
-                this.wsManager.resetWsTimer(tokenId, (id) => {
-                    // Set status to UNKNOWN for token on websocket reset
+                this.wsManager.resetWsTimer(tokenId, { isToken: true }, (id) => {
                     this._setCacheStatus(id, CACHE_STATUS.UNKNOWN, true);
-                    // Clear in-memory cache for token
                     this._resetMemoryCache(id, true);
                 });
 
@@ -595,7 +591,7 @@ class ChronikCache {
                 }
 
                 if (currentStatus === CACHE_STATUS.LATEST) {
-                    this.wsManager.resetWsTimer(address);
+                    this.wsManager.resetWsTimer(address, { isToken: true });
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -663,7 +659,7 @@ class ChronikCache {
         } else {
             this.logger.startTimer(`[${address}] Read persistent cache from DB`);
             cache = await this._readCache(address);
-            this.logger.endTimer(`[${address}] Read persistent cache from DB`);
+            this.logger.endTimer(`[${address}] Read DB cache`);
             if (!cache) return null;
             // Initial memory cache expiry time: 120 seconds
             this.addressMemoryCache.set(address, {
@@ -904,7 +900,7 @@ class ChronikCache {
                 }
 
                 if (currentStatus === CACHE_STATUS.LATEST) {
-                    this.wsManager.resetWsTimer(tokenId);
+                    this.wsManager.resetWsTimer(tokenId, { isToken: true });
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -1061,7 +1057,7 @@ class ChronikCache {
         } else {
             this.logger.startTimer(`[${tokenId}] Read persistent cache from DB`);
             cache = await this._readCache(tokenId);
-            this.logger.endTimer(`[${tokenId}] Read persistent cache from DB`);
+            this.logger.endTimer(`[${tokenId}] Read DB cache`);
             if (!cache) return null;
             // Initial memory cache expiry time: 120 seconds
             this.tokenMemoryCache.set(tokenId, {
