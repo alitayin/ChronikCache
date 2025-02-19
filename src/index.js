@@ -79,6 +79,9 @@ class ChronikCache {
         // 后台定时检查过期条目，将其移除。
         this._startMemoryCacheExpirationCheckTimer();
 
+        // 添加防抖计时器Map
+        this.debounceTimers = new Map();
+
         return new Proxy(this, {
             get: (target, prop) => {
                 // If the property exists on ChronikCache object, return directly
@@ -106,6 +109,23 @@ class ChronikCache {
         });
     }
 
+    // 添加防抖工具方法
+    _debounce(key, fn, delay = 500) {
+        if (this.debounceTimers.has(key)) {
+            clearTimeout(this.debounceTimers.get(key));
+        }
+        
+        const timer = setTimeout(async () => {
+            this.debounceTimers.delete(key);
+            try {
+                await fn();
+            } catch (error) {
+                this.logger.error(`Error in debounced function for ${key}:`, error);
+            }
+        }, delay);
+        
+        this.debounceTimers.set(key, timer);
+    }
 
     // Read cache from database by reading txMap and txOrder separately
     async _readCache(addressOrTokenId) {
@@ -256,13 +276,18 @@ class ChronikCache {
                 });
 
                 await this.wsManager.initWebsocketForAddress(address, async (addr, txid, msgType) => {
+                    const key = `${addr}:${msgType}`;
                     if (msgType === 'TX_ADDED_TO_MEMPOOL') {
-                        const apiNumTxs = await this._quickGetTxCount(addr, 'address');
-                        this._resetMemoryCache(addr, false);
-                        await this._updateCache(addr, apiNumTxs, this.defaultPageSize);
+                        this._debounce(key, async () => {
+                            const apiNumTxs = await this._quickGetTxCount(addr, 'address');
+                            this._resetMemoryCache(addr, false);
+                            await this._updateCache(addr, apiNumTxs, this.defaultPageSize);
+                        });
                     } else if (msgType === 'TX_FINALIZED') {
-                        this._resetMemoryCache(addr, false);
-                        await this._updateUnconfirmedTx(addr, txid);
+                        this._debounce(key, async () => {
+                            this._resetMemoryCache(addr, false);
+                            await this._updateUnconfirmedTx(addr, txid);
+                        });
                     }
                 });
             }, address, 'WebSocket initialization');
@@ -281,13 +306,18 @@ class ChronikCache {
                 });
 
                 await this.wsManager.initWebsocketForToken(tokenId, async (id, txid, msgType) => {
+                    const key = `${id}:${msgType}`;
                     if (msgType === 'TX_ADDED_TO_MEMPOOL') {
-                        const apiNumTxs = await this._quickGetTxCount(id, 'token');
-                        this._resetMemoryCache(id, true);
-                        await this._updateTokenCache(id, apiNumTxs, this.defaultPageSize);
+                        this._debounce(key, async () => {
+                            const apiNumTxs = await this._quickGetTxCount(id, 'token');
+                            this._resetMemoryCache(id, true);
+                            await this._updateTokenCache(id, apiNumTxs, this.defaultPageSize);
+                        });
                     } else if (msgType === 'TX_FINALIZED') {
-                        this._resetMemoryCache(id, true);
-                        await this._updateUnconfirmedTx(id, txid);
+                        this._debounce(key, async () => {
+                            this._resetMemoryCache(id, true);
+                            await this._updateUnconfirmedTx(id, txid);
+                        });
                     }
                 });
             }, tokenId, 'WebSocket initialization');
@@ -591,7 +621,7 @@ class ChronikCache {
                 }
 
                 if (currentStatus === CACHE_STATUS.LATEST) {
-                    this.wsManager.resetWsTimer(address, { isToken: true });
+                    this.wsManager.resetWsTimer(address, { isToken: false });
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -900,7 +930,7 @@ class ChronikCache {
                 }
 
                 if (currentStatus === CACHE_STATUS.LATEST) {
-                    this.wsManager.resetWsTimer(tokenId, { isToken: true });
+                    this.wsManager.resetWsTimer(tokenId, { isToken: false });
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -948,9 +978,9 @@ class ChronikCache {
         };
     }
 
-    // 新增快速获取交易数量的方法
+    // 修改 _quickGetTxCount 方法，添加重试机制
     async _quickGetTxCount(identifier, type = 'address') {
-        try {
+        return await this.failover.executeWithRetry(async () => {
             let result;
             if (type === 'address') {
                 result = await this.chronik.address(identifier).history(0, 1);
@@ -960,10 +990,7 @@ class ChronikCache {
                 throw new Error(`Unsupported type: ${type}`);
             }
             return result.numTxs;
-        } catch (error) {
-            this.logger.error('Error in _quickGetTxCount:', error);
-            throw error;
-        }
+        }, `quickGetTxCount for ${type} ${identifier}`);
     }
 
     // For token cache clear, rely on dbUtils.clearTokenCache (see below)
