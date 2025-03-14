@@ -1,6 +1,6 @@
 {
   "name": "chronik-cache",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "A cache helper for chronik-client",
   "main": "src/index.js",
   "scripts": {

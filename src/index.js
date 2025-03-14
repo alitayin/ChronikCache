@@ -930,7 +930,7 @@ class ChronikCache {
                 }
 
                 if (currentStatus === CACHE_STATUS.LATEST) {
-                    this.wsManager.resetWsTimer(tokenId, { isToken: false });
+                    this.wsManager.resetWsTimer(tokenId, { isToken: true });
                 }
 
                 if (currentStatus !== CACHE_STATUS.LATEST) {

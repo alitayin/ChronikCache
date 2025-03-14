@@ -23,8 +23,12 @@ function sortTxIds(txIds, getTx) {
         if (heightDiff !== 0) return heightDiff;
         
         // 同一区块内，按照 timestamp 和 timeFirstSeen 排序
-        const timestampDiff = txB.block.timestamp - txA.block.timestamp;
-        return timestampDiff !== 0 ? timestampDiff : txB.timeFirstSeen - txA.timeFirstSeen;
+        const blockTimestampA = txA.block.timestamp || 0;
+        const blockTimestampB = txB.block.timestamp || 0;
+        const timestampDiff = blockTimestampB - blockTimestampA;
+        if (timestampDiff !== 0) return timestampDiff;
+        
+        return txB.timeFirstSeen - txA.timeFirstSeen;
     });
 }
 
