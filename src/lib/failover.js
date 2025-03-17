@@ -3,7 +3,7 @@ const Logger = require('./Logger');
 class FailoverHandler {
     constructor(options = {}) {
         this.maxRetries = options.maxRetries || 3;
-        this.retryDelay = options.retryDelay || 1000; // milliseconds
+        this.retryDelay = options.retryDelay || 1500; // milliseconds
         this.exponentialBackoff = options.exponentialBackoff || true;
         this.enableLogging = options.enableLogging || false;
         this.logger = new Logger(this.enableLogging);

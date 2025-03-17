@@ -61,6 +61,13 @@ class WebSocketManager {
                     onEnd: () => {
                         this.logger.log(`[WS] Connection ended for ${address}`);
                         this.wsSubscriptions.delete(address);
+                        // 添加定时器清理
+                        const existingTimeout = this.wsTimeouts.get(address);
+                        if (existingTimeout) {
+                            clearTimeout(existingTimeout);
+                            this.wsTimeouts.delete(address);
+                            this.wsTimeoutExpirations.delete(address);
+                        }
                         this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
                     }
                 });
@@ -113,10 +120,24 @@ class WebSocketManager {
                     },
                     onError: (error) => {
                         this.logger.error(`[WS] Error for Token ${tokenId}:`, error);
+                        this.unsubscribeToken(tokenId);
+                        const existingTimeout = this.wsTimeouts.get(tokenId);
+                        if (existingTimeout) {
+                            clearTimeout(existingTimeout);
+                            this.wsTimeouts.delete(tokenId);
+                            this.wsTimeoutExpirations.delete(tokenId);
+                        }
                     },
                     onEnd: () => {
                         this.logger.log(`[WS] Connection ended for Token ${tokenId}`);
                         this.wsSubscriptions.delete(tokenId);
+                        // 添加定时器清理
+                        const existingTimeout = this.wsTimeouts.get(tokenId);
+                        if (existingTimeout) {
+                            clearTimeout(existingTimeout);
+                            this.wsTimeouts.delete(tokenId);
+                            this.wsTimeoutExpirations.delete(tokenId);
+                        }
                         this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
                     }
                 });
