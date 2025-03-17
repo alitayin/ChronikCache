@@ -25,7 +25,7 @@ class WebSocketManager {
         return await this.failover.handleWebSocketOperation(
             async () => {
                 if (this.wsSubscriptions.has(address)) {
-                    this.logger.log(`[WS] Address ${address} is already subscribed. Current subscription count: ${this.wsSubscriptions.size}`);
+                    this.logger.log(`[WS] Address ${address} is already subscribed. Current WS: ${this.wsSubscriptions.size}`);
                     return;
                 }
 
@@ -49,26 +49,46 @@ class WebSocketManager {
                         }
                     },
                     onConnect: () => {
-                        // Connection log removed.
+                        ws.subscribeToAddress(address);
                     },
                     onReconnect: () => {
-                        this.logger.log(`[WS] Reconnected for ${address}`);
-                        ws.subscribeToAddress(address);
+                        this.logger.log(`[WS] Reconnecting for ${address}`);
+                        
+                        const reconnectTimeout = setTimeout(() => {
+                            this.logger.log(`[WS] Reconnection timeout for ${address}`);
+                            ws.manuallyClosed = true;
+                            this.unsubscribeAddress(address);
+                        }, 5000);
+
+                        const originalOnConnect = ws.onConnect;
+                        ws.onConnect = (e) => {
+                            clearTimeout(reconnectTimeout);
+                            if (originalOnConnect) originalOnConnect(e);
+                        };
                     },
                     onError: (error) => {
                         this.logger.error(`[WS] Error for ${address}:`, error);
-                    },
-                    onEnd: () => {
-                        this.logger.log(`[WS] Connection ended for ${address}`);
-                        this.wsSubscriptions.delete(address);
-                        // 添加定时器清理
+                        // 在错误处理时标记为手动关闭，防止自动重连
+                        ws.manuallyClosed = true;
+                        this.unsubscribeAddress(address);
                         const existingTimeout = this.wsTimeouts.get(address);
                         if (existingTimeout) {
                             clearTimeout(existingTimeout);
                             this.wsTimeouts.delete(address);
                             this.wsTimeoutExpirations.delete(address);
                         }
-                        this.logger.log(`[WS] Current subscription count: ${this.wsSubscriptions.size}`);
+                    },
+                    onEnd: () => {
+                        this.logger.log(`[WS] Connection ended for ${address}`);
+                        this.wsSubscriptions.delete(address);
+                        // 清理定时器
+                        const existingTimeout = this.wsTimeouts.get(address);
+                        if (existingTimeout) {
+                            clearTimeout(existingTimeout);
+                            this.wsTimeouts.delete(address);
+                            this.wsTimeoutExpirations.delete(address);
+                        }
+                        this.logger.log(`[WS] Current WS: ${this.wsSubscriptions.size}`);
                     }
                 });
 
@@ -111,15 +131,27 @@ class WebSocketManager {
                         }
                     },
                     onConnect: () => {
-                        // Connection log removed.
                         ws.subscribeToTokenId(tokenId);
                     },
                     onReconnect: () => {
-                        this.logger.log(`[WS] Reconnected for Token ${tokenId}`);
-                        ws.subscribeToTokenId(tokenId);
+                        this.logger.log(`[WS] Reconnecting for Token ${tokenId}`);
+                        
+                        const reconnectTimeout = setTimeout(() => {
+                            this.logger.log(`[WS] Reconnection timeout for Token ${tokenId}`);
+                            ws.manuallyClosed = true;
+                            this.unsubscribeToken(tokenId);
+                        }, 5000);
+
+                        const originalOnConnect = ws.onConnect;
+                        ws.onConnect = (e) => {
+                            clearTimeout(reconnectTimeout);
+                            if (originalOnConnect) originalOnConnect(e);
+                        };
                     },
                     onError: (error) => {
                         this.logger.error(`[WS] Error for Token ${tokenId}:`, error);
+                        // 在错误处理时标记为手动关闭，防止自动重连
+                        ws.manuallyClosed = true;
                         this.unsubscribeToken(tokenId);
                         const existingTimeout = this.wsTimeouts.get(tokenId);
                         if (existingTimeout) {
@@ -131,7 +163,7 @@ class WebSocketManager {
                     onEnd: () => {
                         this.logger.log(`[WS] Connection ended for Token ${tokenId}`);
                         this.wsSubscriptions.delete(tokenId);
-                        // 添加定时器清理
+                        // 清理定时器
                         const existingTimeout = this.wsTimeouts.get(tokenId);
                         if (existingTimeout) {
                             clearTimeout(existingTimeout);
@@ -157,8 +189,19 @@ class WebSocketManager {
         const ws = this.wsSubscriptions.get(address);
         if (ws) {
             ws.unsubscribeFromAddress(address);
+            ws.close();  // 关闭连接
             this.wsSubscriptions.delete(address);
             this.logger.log(`[WS] Unsubscribed from ${address}. Current subscription count: ${this.wsSubscriptions.size}`);
+        }
+    }
+
+    unsubscribeToken(tokenId) {
+        const ws = this.wsSubscriptions.get(tokenId);
+        if (ws) {
+            ws.unsubscribeFromTokenId(tokenId);
+            ws.close();  // 关闭连接
+            this.wsSubscriptions.delete(tokenId);
+            this.logger.log(`[WS] Unsubscribed from token ${tokenId}. Current subscription count: ${this.wsSubscriptions.size}`);
         }
     }
 
@@ -168,9 +211,8 @@ class WebSocketManager {
                 ws.unsubscribeFromAddress(key);
             } else if (ws.subscriptionType === 'token') {
                 ws.unsubscribeFromTokenId(key);
-            } else {
-                ws.unsubscribeFromAddress(key);
             }
+            ws.close();  // 关闭每个连接
         }
         this.wsSubscriptions.clear();
         this.logger.log('[WS] Unsubscribed from all subscriptions (addresses and tokens).');
@@ -239,21 +281,12 @@ class WebSocketManager {
             } else {
                 ws.unsubscribeFromAddress(oldestKey);
             }
+            ws.close();  // 添加这行来关闭WebSocket连接
             this.wsSubscriptions.delete(oldestKey);
             this.logger.log(`[WS] Evicted oldest subscription with key: ${oldestKey}. Current subscription count: ${this.wsSubscriptions.size}`);
             if (this.onEvict && typeof this.onEvict === 'function') {
                 this.onEvict(oldestKey, ws.subscriptionType);
             }
-        }
-    }
-
-    unsubscribeToken(tokenId) {
-        const ws = this.wsSubscriptions.get(tokenId);
-        if (ws) {
-            // Cancel token subscription
-            ws.unsubscribeFromTokenId(tokenId);
-            this.wsSubscriptions.delete(tokenId);
-            this.logger.log(`[WS] Unsubscribed from token ${tokenId}. Current subscription count: ${this.wsSubscriptions.size}`);
         }
     }
 }
