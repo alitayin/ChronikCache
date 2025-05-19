@@ -1032,7 +1032,7 @@ class ChronikCache {
         let updated = false;
 
         const unconfirmedTxids = txsInCurrentPage
-            .filter(tx => !tx.isFinal && (!tx.block || !tx.block.height))
+            .filter(tx => !tx.block || !tx.block.height)
             .map(tx => tx.txid);
 
         // 使用 Promise.all 和任务队列处理所有未确认交易
@@ -1040,7 +1040,7 @@ class ChronikCache {
             this.txUpdateQueue.enqueue(async () => {
                 try {
                     const updatedTx = await this.chronik.tx(txid);
-                    if (updatedTx && updatedTx.isFinal) {
+                    if (updatedTx && updatedTx.block && updatedTx.block.height) {
                         cache.txMap[txid] = updatedTx;
                         updated = true;
                     }
