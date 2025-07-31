@@ -1,3 +1,7 @@
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 // Cache status constants
 export enum CacheStatus {
     UNKNOWN = 0,
@@ -65,7 +69,7 @@ export interface OutPoint {
 export interface BlockInfo {
     hash: string;
     height: number;
-    timestamp: string;
+    timestamp: number;
 }
 
 export interface Token {

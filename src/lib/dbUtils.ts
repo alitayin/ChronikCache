@@ -1,31 +1,63 @@
-const { Level } = require('level');
-const FailoverHandler = require('./failover');
-const Logger = require('./Logger');
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-class DbUtils {
+import { Level } from 'level';
+import FailoverHandler from './failover';
+import Logger from './Logger';
+
+interface DbUtilsOptions {
+    valueEncoding?: string;
+    maxCacheSize?: number;
+    enableLogging?: boolean;
+    failoverOptions?: any;
+}
+
+interface CacheEntry {
+    identifier: string;
+    accessCount: number;
+    size: number;
+}
+
+interface MetaData {
+    pageCount: number;
+}
+
+export default class DbUtils {
+    public db: Level<string, any>;
+    private maxCacheSize: number;
+    public cacheDir: string;
+    private failover: FailoverHandler;
+    private logger: Logger;
+
     /**
-     * @param {string} cacheDir Database file path
-     * @param {object} options Optional parameters
-     * @param {string} [options.valueEncoding='json'] LevelDB encoding method
-     * @param {number} [options.maxCacheSize=Infinity] Maximum cache size (in bytes)
-     * @param {boolean} [options.enableLogging=false] Enable logging
+     * @param cacheDir Database file path
+     * @param options Optional parameters
      */
-    constructor(cacheDir, options = {}) {
-        const { valueEncoding = 'json', maxCacheSize = Infinity, enableLogging = false } = options;
-        this.db = new Level(cacheDir, { valueEncoding });
+    constructor(cacheDir: string, options: DbUtilsOptions = {}) {
+        const { maxCacheSize = Infinity, enableLogging = false } = options;
+        this.db = new Level(cacheDir, { 
+            valueEncoding: {
+                format: 'utf8',
+                encode: (obj: any) => JSON.stringify(obj, (_k, v) => typeof v === 'bigint' ? v.toString() : v),
+                decode: (str: string) => JSON.parse(str, (_k, v) => typeof v === 'string' && /^\d{16,}$/.test(v) ? BigInt(v) : v)
+            }
+        });
         this.maxCacheSize = maxCacheSize;
         this.cacheDir = cacheDir;
         this.failover = new FailoverHandler(options.failoverOptions || {});
         this.logger = new Logger(enableLogging);
     }
 
-    // Unified DB read operation handler
-    async get(key, defaultValue = null) {
+    /**
+     * Unified DB read operation handler
+     */
+    async get(key: string, defaultValue: any = null): Promise<any> {
         return await this.failover.handleDbOperation(
             async () => {
                 try {
                     return await this.db.get(key);
-                } catch (error) {
+                } catch (error: any) {
                     if (error.notFound) {
                         return defaultValue;
                     }
@@ -36,8 +68,10 @@ class DbUtils {
         );
     }
 
-    // Unified DB write operation handler
-    async put(key, value) {
+    /**
+     * Unified DB write operation handler
+     */
+    async put(key: string, value: any): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 await this.db.put(key, value);
@@ -46,8 +80,10 @@ class DbUtils {
         );
     }
 
-    // Unified DB delete operation handler
-    async del(key) {
+    /**
+     * Unified DB delete operation handler
+     */
+    async del(key: string): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 await this.db.del(key);
@@ -56,9 +92,11 @@ class DbUtils {
         );
     }
 
-    // Calculate cache size
-    async calculateCacheSize() {
-        return await this.failover.handleDbOperation(
+    /**
+     * Calculate cache size
+     */
+    async calculateCacheSize(): Promise<number> {
+        const result = await this.failover.handleDbOperation(
             async () => {
                 let totalSize = 0;
                 for await (const [key, value] of this.db.iterator()) {
@@ -70,10 +108,13 @@ class DbUtils {
             },
             'Calculate cache size operation'
         );
+        return result as number;
     }
 
-    // Provide iterator interface for reading all key-value pairs
-    async *iterator() {
+    /**
+     * Provide iterator interface for reading all key-value pairs
+     */
+    async *iterator(): AsyncGenerator<[string, any], void, unknown> {
         try {
             for await (const [key, value] of this.db.iterator()) {
                 yield [key, value];
@@ -84,8 +125,10 @@ class DbUtils {
         }
     }
 
-    // Clear database
-    async clear() {
+    /**
+     * Clear database
+     */
+    async clear(): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 await this.db.clear();
@@ -94,13 +137,15 @@ class DbUtils {
         );
     }
 
-    // Clean least accessed entries in cache
-    async cleanLeastAccessedCache() {
+    /**
+     * Clean least accessed entries in cache
+     */
+    async cleanLeastAccessedCache(): Promise<void> {
         try {
             let currentSize = await this.calculateCacheSize();
             this.logger.log(`Initial cache size: ${currentSize} bytes, max allowed size: ${this.maxCacheSize}`);
 
-            const entries = [];
+            const entries: CacheEntry[] = [];
             for await (const [key, value] of this.db.iterator()) {
                 const size = Buffer.byteLength(JSON.stringify(value), 'utf8');
 
@@ -143,8 +188,10 @@ class DbUtils {
         }
     }
 
-    // Clear all cache
-    async clearAll() {
+    /**
+     * Clear all cache
+     */
+    async clearAll(): Promise<void> {
         try {
             await this.db.clear();
         } catch (error) {
@@ -152,12 +199,14 @@ class DbUtils {
         }
     }
 
-    // Delete data stored in a paginated manner.
-    async deletePaginated(keyBase) {
+    /**
+     * Delete data stored in a paginated manner.
+     */
+    async deletePaginated(keyBase: string): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 try {
-                    const meta = await this.db.get(`${keyBase}:meta`);
+                    const meta: MetaData = await this.db.get(`${keyBase}:meta`);
                     if (meta) {
                         const { pageCount } = meta;
                         for (let i = 0; i < pageCount; i++) {
@@ -166,7 +215,7 @@ class DbUtils {
                         await this.del(`${keyBase}:meta`);
                         return;
                     }
-                } catch (error) {
+                } catch {
                     // If meta not found, fall through.
                 }
                 await this.del(keyBase);
@@ -175,8 +224,10 @@ class DbUtils {
         );
     }
 
-    // Unified DB token cache delete operation handler with pagination support
-    async clearTokenCache(tokenId) {
+    /**
+     * Unified DB token cache delete operation handler with pagination support
+     */
+    async clearTokenCache(tokenId: string): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 await this.deletePaginated(`${tokenId}:txMap`);
@@ -187,8 +238,10 @@ class DbUtils {
         );
     }
 
-    // 添加用于存储全局元数据的方法
-    async updateGlobalMetadata(key, data) {
+    /**
+     * 添加用于存储全局元数据的方法
+     */
+    async updateGlobalMetadata(key: string, data: any): Promise<void> {
         return await this.failover.handleDbOperation(
             async () => {
                 await this.db.put(`metadata:${key}`, data);
@@ -197,13 +250,15 @@ class DbUtils {
         );
     }
 
-    // 添加用于获取全局元数据的方法
-    async getGlobalMetadata(key, defaultValue = null) {
+    /**
+     * 添加用于获取全局元数据的方法
+     */
+    async getGlobalMetadata(key: string, defaultValue: any = null): Promise<any> {
         return await this.failover.handleDbOperation(
             async () => {
                 try {
                     return await this.db.get(`metadata:${key}`);
-                } catch (error) {
+                } catch (error: any) {
                     if (error.notFound) {
                         return defaultValue;
                     }
@@ -213,6 +268,4 @@ class DbUtils {
             `DB get global metadata operation for ${key}`
         );
     }
-}
-
-module.exports = DbUtils; 
+} 

@@ -1,3 +1,7 @@
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 // 缓存状态枚举
 export const CACHE_STATUS = {
     UNKNOWN: 'UNKNOWN',      // 未确认是否最新

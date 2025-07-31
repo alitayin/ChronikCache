@@ -13,7 +13,7 @@ const { ChronikClient } = require('chronik-client');
 const ChronikCache = require('chronik-cache');
 
 // Create chronik client
-const chronik = new ChronikClient('https://chronik.fabien.cash');
+const chronik = new ChronikClient('https://chronik1.alitayin.com');
 
 // Create cache with configuration
 const cache = new ChronikCache(chronik, {

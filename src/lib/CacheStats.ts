@@ -1,14 +1,103 @@
-class CacheStats {
-    constructor(chronikCache, logger) {
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+import Logger from './Logger';
+
+interface SizeStats {
+    total: number;
+    transactions: number;
+    metadata: number;
+    other: number;
+}
+
+interface DatabaseStats {
+    totalSize: string;
+    maxSize: string;
+    cacheDir: string;
+    sizeBreakdown?: {
+        transactions: string;
+        metadata: string;
+        other: string;
+    };
+}
+
+interface ItemSample {
+    identifier: string;
+    status: string;
+    createdAt: string;
+    lastAccessAt: string | null;
+    accessCount: number;
+    numTxs: number;
+}
+
+interface ItemStats {
+    total: number;
+    byStatus: Record<string, number>;
+    samples: ItemSample[];
+}
+
+interface SystemStats {
+    globalMetadataCache: {
+        size: number;
+        limit: number;
+    };
+    websocket: {
+        activeConnections: number;
+        subscriptions: number;
+    };
+    configuration: {
+        maxTxLimit: number;
+        maxCacheSize: string;
+        defaultPageSize: number;
+        cacheDir: string;
+    };
+}
+
+interface QueueStats {
+    updateQueue: {
+        currentLength: number;
+        maxConcurrency: number;
+    };
+    txUpdateQueue: {
+        currentLength: number;
+        maxConcurrency: number;
+    };
+}
+
+interface CacheStatistics {
+    items: ItemStats;
+    system: SystemStats;
+    queues: QueueStats;
+    database: DatabaseStats;
+}
+
+interface ChronikCache {
+    db: any;
+    getCacheStatus: (identifier: string, isToken: boolean) => string | null;
+    _getGlobalMetadata: (identifier: string, isToken: boolean) => Promise<any>;
+    globalMetadataCache: Map<string, any>;
+    globalMetadataCacheLimit: number;
+    wsManager: any;
+    updateQueue?: any;
+    txUpdateQueue?: any;
+    [key: string]: any;  // Allow access to private properties
+}
+
+export default class CacheStats {
+    private cache: ChronikCache;
+    private logger: Logger;
+
+    constructor(chronikCache: ChronikCache, logger: Logger) {
         this.cache = chronikCache;
         this.logger = logger;
     }
 
-    async getStatistics() {
+    async getStatistics(): Promise<CacheStatistics> {
         try {
             const dbStats = await this._getDbStats();
             
-            const stats = {
+            const stats: CacheStatistics = {
                 items: await this._getItemStats(),
                 system: this._getSystemStats(),
                 queues: this._getQueueStats(),
@@ -22,13 +111,13 @@ class CacheStats {
         }
     }
 
-    async _getDbStats() {
+    private async _getDbStats(): Promise<DatabaseStats> {
         try {
             const totalSize = await this.cache.db.calculateCacheSize();
             const maxSize = this.cache.maxCacheSize;
             
             // 简化分类统计，不再区分 address 和 token
-            const sizeStats = {
+            const sizeStats: SizeStats = {
                 total: totalSize,
                 transactions: 0,  // 合并 address 和 token 的交易数据
                 metadata: 0,
@@ -69,8 +158,8 @@ class CacheStats {
         }
     }
 
-    async _getItemStats() {
-        const stats = {
+    private async _getItemStats(): Promise<ItemStats> {
+        const stats: ItemStats = {
             total: 0,
             byStatus: {},
             samples: []
@@ -78,7 +167,7 @@ class CacheStats {
 
         try {
             // Collect identifiers from database keys containing txOrder
-            const itemSet = new Set();
+            const itemSet = new Set<string>();
             for await (const [key] of this.cache.db.db.iterator()) {
                 if (key.includes(':txOrder')) {
                     // Use the key string up to the last ':' as identifier.
@@ -116,7 +205,7 @@ class CacheStats {
         return stats;
     }
 
-    _getSystemStats() {
+    private _getSystemStats(): SystemStats {
         return {
             globalMetadataCache: {
                 size: this.cache.globalMetadataCache.size,
@@ -135,7 +224,7 @@ class CacheStats {
         };
     }
 
-    _getQueueStats() {
+    private _getQueueStats(): QueueStats {
         return {
             updateQueue: {
                 currentLength: this.cache.updateQueue?.getQueueLength() || 0,
@@ -147,6 +236,4 @@ class CacheStats {
             }
         };
     }
-}
-
-module.exports = CacheStats; 
+} 

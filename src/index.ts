@@ -1,3 +1,7 @@
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 import DbUtils from './lib/dbUtils';
 import WebSocketManager from './lib/WebSocketManager';
 import Logger from './lib/Logger';
@@ -32,18 +36,18 @@ class ChronikCache {
     private maxCacheSize: number;
     private enableLogging: boolean;
     private logger: any;
-    private db: any;
+    public db: any;
     private statusMap: Map<string, CacheStatusInfo>;
-    private wsManager: any;
+    public wsManager: any;
     private updateLocks: Map<string, boolean>;
     private scriptToAddressMap: Map<string, string>;
     private failover: any;
     private tokenStatusMap: Map<string, CacheStatusInfo>;
     private tokenUpdateLocks: Map<string, boolean>;
-    private globalMetadataCache: Map<string, CacheMetadata>;
-    private globalMetadataCacheLimit: number;
-    private updateQueue: any;
-    private txUpdateQueue: any;
+    public globalMetadataCache: Map<string, CacheMetadata>;
+    public globalMetadataCacheLimit: number;
+    public updateQueue: any;
+    public txUpdateQueue: any;
     private addressMemoryCache: Map<string, MemoryCacheEntry<CacheData>>;
     private tokenMemoryCache: Map<string, MemoryCacheEntry<CacheData>>;
     private stats: any;
@@ -171,12 +175,12 @@ class ChronikCache {
             let txMap: Record<string, Transaction>;
 
             // Check for paginated txOrder
-            let txOrderMeta = await this.db.get(`${addressOrTokenId}:txOrder:meta`);
+            const txOrderMeta = await this.db.get(`${addressOrTokenId}:txOrder:meta`);
             if (txOrderMeta) {
                 const { pageCount } = txOrderMeta;
                 txOrder = [];
                 for (let i = 0; i < pageCount; i++) {
-                    let chunk = await this.db.get(`${addressOrTokenId}:txOrder:${i}`);
+                    const chunk = await this.db.get(`${addressOrTokenId}:txOrder:${i}`);
                     txOrder = txOrder.concat(chunk);
                 }
             } else {
@@ -185,12 +189,12 @@ class ChronikCache {
             if (!txOrder) return null;
 
             // Check for paginated txMap
-            let txMapMeta = await this.db.get(`${addressOrTokenId}:txMap:meta`);
+            const txMapMeta = await this.db.get(`${addressOrTokenId}:txMap:meta`);
             if (txMapMeta) {
                 const { pageCount } = txMapMeta;
                 txMap = {};
                 for (let i = 0; i < pageCount; i++) {
-                    let chunk = await this.db.get(`${addressOrTokenId}:txMap:${i}`);
+                    const chunk = await this.db.get(`${addressOrTokenId}:txMap:${i}`);
                     txMap = Object.assign(txMap, chunk);
                 }
             } else {
@@ -212,7 +216,7 @@ class ChronikCache {
                 txOrder, 
                 numTxs: (metadata.numTxs !== undefined ? metadata.numTxs : txOrder.length) 
             };
-        } catch (error) {
+        } catch {
             return null;
         }
     }
@@ -242,14 +246,14 @@ class ChronikCache {
         if (totalTxs > MAX_ITEMS_PER_KEY) {
             const pageCount = Math.ceil(totalTxs / MAX_ITEMS_PER_KEY);
             for (let i = 0; i < pageCount; i++) {
-                let chunk = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
+                const chunk = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
                 await this.db.put(`${addressOrTokenId}:txOrder:${i}`, chunk);
             }
             await this.db.put(`${addressOrTokenId}:txOrder:meta`, { pageCount, totalTxs });
             
             for (let i = 0; i < pageCount; i++) {
-                let chunkKeys = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
-                let chunkMap: Record<string, Transaction> = {};
+                const chunkKeys = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
+                const chunkMap: Record<string, Transaction> = {};
                 for (const txid of chunkKeys) {
                     chunkMap[txid] = data.txMap[txid];
                 }
@@ -284,7 +288,7 @@ class ChronikCache {
     }
 
     // 获取全局元数据
-    private async _getGlobalMetadata(identifier: string, isToken: boolean = false): Promise<CacheMetadata | null> {
+    public async _getGlobalMetadata(identifier: string, isToken: boolean = false): Promise<CacheMetadata | null> {
         const key = isToken ? `token:${identifier}` : `address:${identifier}`;
         // Try to get from in-memory cache
         if (this.globalMetadataCache.has(key)) {
@@ -469,8 +473,8 @@ class ChronikCache {
                 this.logger.log(`[${address}] Starting cache update.`);
                 let currentPage = 0;
                 let iterationCount = 0;
-                let localCache = await this._readCache(address) || { txMap: {}, txOrder: [] };
-                let localTxMap = new Map(Object.entries(localCache.txMap));
+                const localCache = await this._readCache(address) || { txMap: {}, txOrder: [] };
+                const localTxMap = new Map(Object.entries(localCache.txMap));
                 let localTxOrder = localCache.txOrder;
                 
                 while (true) {
@@ -641,7 +645,7 @@ class ChronikCache {
 
                 this.logger.log(`[${address}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
                 
-                const wsTimeInfo = this.wsManager.getRemainingTime(address);
+                const wsTimeInfo = this.wsManager.getRemainingTime(address, { isToken: false });
                 if (wsTimeInfo.active) {
                     // WebSocket is active
                 } else {
@@ -836,8 +840,8 @@ class ChronikCache {
                 this.logger.log(`[${tokenId}] Starting cache update.`);
                 let currentPage = 0;
                 let iterationCount = 0;
-                let localCache = await this._readCache(tokenId) || { txMap: {}, txOrder: [] };
-                let localTxMap = new Map(Object.entries(localCache.txMap));
+                const localCache = await this._readCache(tokenId) || { txMap: {}, txOrder: [] };
+                const localTxMap = new Map(Object.entries(localCache.txMap));
                 let localTxOrder = localCache.txOrder;
         
                 while (true) {
@@ -943,7 +947,7 @@ class ChronikCache {
                 this.logger.log(`[Token ${tokenId}] Cache status: ${currentStatus}, Cached txs: ${cachedCount}`);
 
                 // 检查 WebSocket 定时器状态
-                const wsTimeInfo = this.wsManager.getRemainingTime(tokenId);
+                const wsTimeInfo = this.wsManager.getRemainingTime(tokenId, { isToken: true });
                 if (wsTimeInfo.active) {
                     // WebSocket is active
                 } else {
@@ -1032,7 +1036,7 @@ class ChronikCache {
         return this.txUpdateQueue.enqueue(async () => {
             try {
                 const updatedTx = await this.chronik.tx(txid);
-                let cache = await this._readCache(addressOrTokenId);
+                const cache = await this._readCache(addressOrTokenId);
                 if (!cache || !cache.txMap) {
                     this.logger.log(`[${addressOrTokenId}] Cache not found or empty when updating tx`);
                     return;
@@ -1242,3 +1246,4 @@ class ChronikCache {
 }
 
 export = ChronikCache; 
+

@@ -1,5 +1,9 @@
+// Copyright (c) 2024 The Bitcoin developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
 const { ChronikClient } = require('chronik-client');
-const ChronikCache = require('../src/index.js');
+const ChronikCache = require('../src/index.ts');
 const assert = require('assert');
 
 describe('ChronikCache 基础功能测试', () => {
