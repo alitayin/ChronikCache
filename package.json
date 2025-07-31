@@ -2,33 +2,49 @@
   "name": "chronik-cache",
   "version": "1.1.0",
   "description": "A cache helper for chronik-client",
-  "main": "src/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "scripts": {
-    "test": "mocha test/**/*.test.js",
-    "start": "node index.js"
+    "build": "tsc",
+    "dev": "ts-node src/index.ts",
+    "test": "mocha -r ts-node/register test/**/*.test.ts",
+    "test:js": "mocha test/**/*.test.js",
+    "start": "node dist/index.js",
+    "example": "node example.js",
+    "prepublishOnly": "npm run build"
   },
   "author": "Alita Yin",
   "license": "ISC",
   "keywords": [
     "chronik",
     "ecash",
-    "cache"
+    "cache",
+    "typescript"
   ],
   "dependencies": {
+    "chronik-client": "^3.3.0",
     "crypto-js": "^4.2.0",
     "ecashaddrjs": "^2.0.0",
+    "express": "^5.1.0",
     "level": "^9.0.0"
   },
   "devDependencies": {
-    "chronik-client": "^2.1.1",
-    "mocha": "^11.1.0"
+    "@types/crypto-js": "^4.2.2",
+    "@types/node": "^20.19.9",
+    "mocha": "^11.1.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
   },
   "files": [
+    "dist",
     "src",
     "README.md"
   ],
   "exports": {
-    ".": "./src/index.js"
-  },
-  "types": "./src/index.d.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "import": "./dist/index.js"
+    }
+  }
 }

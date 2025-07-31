@@ -41,6 +41,7 @@ node_modules/
 docs/
 examples/
 demo/
+example.js
 
 # 其他
 *.tgz

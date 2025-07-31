@@ -1,32 +1,71 @@
-const DbUtils = require('./lib/dbUtils');
-const WebSocketManager = require('./lib/WebSocketManager');
-const Logger = require('./lib/Logger');
-const { encodeCashAddress } = require('ecashaddrjs');
-const { CACHE_STATUS, DEFAULT_CONFIG } = require('./constants');
-const FailoverHandler = require('./lib/failover');
-const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY; 
-const { computeHash } = require('./lib/hash');
-const TaskQueue = require('./lib/TaskQueue');
-// Import external sortTxIds function from lib
-const sortTxIds = require('./lib/sortTxIds');
-const CacheStats = require('./lib/CacheStats');
+import DbUtils from './lib/dbUtils';
+import WebSocketManager from './lib/WebSocketManager';
+import Logger from './lib/Logger';
+import { encodeCashAddress } from 'ecashaddrjs';
+import { CACHE_STATUS, DEFAULT_CONFIG } from './constants';
+import FailoverHandler from './lib/failover';
+import { computeHash } from './lib/hash';
+import TaskQueue from './lib/TaskQueue';
+import sortTxIds from './lib/sortTxIds';
+import CacheStats from './lib/CacheStats';
 
+import {
+    ChronikCacheConfig,
+    Transaction,
+    HistoryResponse,
+    CacheData,
+    CacheMetadata,
+    CacheStatusInfo,
+    WebSocketMessageType,
+    CacheStatistics,
+    ChronikClientInterface,
+    MemoryCacheEntry
+} from './types';
+
+const MAX_ITEMS_PER_KEY = DEFAULT_CONFIG.MAX_ITEMS_PER_KEY;
 
 class ChronikCache {
-    constructor(chronik, {
-        maxTxLimit = DEFAULT_CONFIG.MAX_TX_LIMIT,
-        maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
-        failoverOptions = {},
-        enableLogging = true,
-        enableTimer = false,
-        wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
-        wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
-    } = {}) {
+    private chronik: ChronikClientInterface;
+    private maxTxLimit: number;
+    private defaultPageSize: number;
+    private cacheDir: string;
+    private maxCacheSize: number;
+    private enableLogging: boolean;
+    private logger: any;
+    private db: any;
+    private statusMap: Map<string, CacheStatusInfo>;
+    private wsManager: any;
+    private updateLocks: Map<string, boolean>;
+    private scriptToAddressMap: Map<string, string>;
+    private failover: any;
+    private tokenStatusMap: Map<string, CacheStatusInfo>;
+    private tokenUpdateLocks: Map<string, boolean>;
+    private globalMetadataCache: Map<string, CacheMetadata>;
+    private globalMetadataCacheLimit: number;
+    private updateQueue: any;
+    private txUpdateQueue: any;
+    private addressMemoryCache: Map<string, MemoryCacheEntry<CacheData>>;
+    private tokenMemoryCache: Map<string, MemoryCacheEntry<CacheData>>;
+    private stats: any;
+    private debounceTimers: Map<string, NodeJS.Timeout>;
+    private memoryCacheCleanupInterval?: NodeJS.Timeout;
+
+    constructor(chronik: ChronikClientInterface, config: ChronikCacheConfig = {}) {
+        const {
+            maxTxLimit = DEFAULT_CONFIG.MAX_TX_LIMIT,
+            maxCacheSize = DEFAULT_CONFIG.MAX_CACHE_SIZE,
+            failoverOptions = {},
+            enableLogging = true,
+            enableTimer = false,
+            wsTimeout = DEFAULT_CONFIG.WS_TIMEOUT,
+            wsExtendTimeout = DEFAULT_CONFIG.WS_EXTEND_TIMEOUT
+        } = config;
+
         this.chronik = chronik;
         this.maxTxLimit = maxTxLimit;
         this.defaultPageSize = DEFAULT_CONFIG.DEFAULT_PAGE_SIZE;
         this.cacheDir = DEFAULT_CONFIG.CACHE_DIR;
-        this.maxCacheSize = maxCacheSize * 1024 * 1024;  
+        this.maxCacheSize = maxCacheSize * 1024 * 1024;
         this.enableLogging = enableLogging;
 
         this.logger = new Logger(enableLogging, enableTimer);
@@ -38,26 +77,26 @@ class ChronikCache {
             enableLogging
         });
 
-        this.statusMap = new Map();
+        this.statusMap = new Map<string, CacheStatusInfo>();
         // Pass onEvict callback to update cache status to UNKNOWN
         this.wsManager = new WebSocketManager(chronik, failoverOptions, enableLogging, {
-            wsTimeout,
-            wsExtendTimeout,
-            onEvict: (identifier, subscriptionType) => {
+            wsTimeout: wsTimeout as any,
+            wsExtendTimeout: wsExtendTimeout as any,
+            onEvict: (identifier: string, subscriptionType: string) => {
                 const isToken = subscriptionType === 'token';
                 this._setCacheStatus(identifier, CACHE_STATUS.UNKNOWN, isToken);
             }
         });
-        this.updateLocks = new Map();
+        this.updateLocks = new Map<string, boolean>();
         // Add script type to address cache mapping
-        this.scriptToAddressMap = new Map();
+        this.scriptToAddressMap = new Map<string, string>();
         // Add failover handler
         this.failover = new FailoverHandler(failoverOptions);
         // 添加token缓存相关的Map
-        this.tokenStatusMap = new Map();
-        this.tokenUpdateLocks = new Map();
+        this.tokenStatusMap = new Map<string, CacheStatusInfo>();
+        this.tokenUpdateLocks = new Map<string, boolean>();
         // 初始化全局元数据缓存，防止频繁访问数据库
-        this.globalMetadataCache = new Map();
+        this.globalMetadataCache = new Map<string, CacheMetadata>();
         // Set LRU cache limit for global metadata cache
         this.globalMetadataCacheLimit = DEFAULT_CONFIG.GLOBAL_METADATA_CACHE_LIMIT || 100;
         // 初始化全局任务队列，最大并发 2 个
@@ -67,32 +106,30 @@ class ChronikCache {
         
         // =========================================================
         // NEW: In-memory cache to hold the entire persistent cache
-        this.addressMemoryCache = new Map();
-        this.tokenMemoryCache = new Map();
+        this.addressMemoryCache = new Map<string, MemoryCacheEntry<CacheData>>();
+        this.tokenMemoryCache = new Map<string, MemoryCacheEntry<CacheData>>();
         // =========================================================
         
         // Initialize stats
         this.stats = new CacheStats(this, this.logger);
 
-        // 在内存缓存中，为每个条目都维护一个独立的过期时间（初始120秒）。
-        // 每访问一次该条目，就将过期时间增加10秒。
-        // 后台定时检查过期条目，将其移除。
+        // 启动内存缓存过期检查定时器
         this._startMemoryCacheExpirationCheckTimer();
 
         // 添加防抖计时器Map
-        this.debounceTimers = new Map();
+        this.debounceTimers = new Map<string, NodeJS.Timeout>();
 
         return new Proxy(this, {
-            get: (target, prop) => {
+            get: (target: any, prop: string | symbol) => {
                 // If the property exists on ChronikCache object, return directly
                 if (prop in target) {
                     return target[prop];
                 }
                 // If the underlying chronik has the function, wrap it to add status: 3 to the result
-                if (typeof chronik[prop] === 'function') {
-                    return (...args) => {
-                        this.logger.log(`Forwarding uncached method call: ${prop}`);
-                        return Promise.resolve(chronik[prop](...args)).then(result => {
+                if (typeof (chronik as any)[prop] === 'function') {
+                    return (...args: any[]) => {
+                        this.logger.log(`Forwarding uncached method call: ${String(prop)}`);
+                        return Promise.resolve((chronik as any)[prop](...args)).then((result: any) => {
                             if (typeof result === 'object' && result !== null) {
                                 return { ...result, status: 3 };
                             }
@@ -102,7 +139,7 @@ class ChronikCache {
                 }
                 // If the underlying chronik has this property, return it
                 if (prop in chronik) {
-                    return chronik[prop];
+                    return (chronik as any)[prop];
                 }
                 return undefined;
             }
@@ -110,9 +147,9 @@ class ChronikCache {
     }
 
     // 添加防抖工具方法
-    _debounce(key, fn, delay = 500) {
+    private _debounce(key: string, fn: () => Promise<void>, delay: number = 500): void {
         if (this.debounceTimers.has(key)) {
-            clearTimeout(this.debounceTimers.get(key));
+            clearTimeout(this.debounceTimers.get(key)!);
         }
         
         const timer = setTimeout(async () => {
@@ -128,9 +165,10 @@ class ChronikCache {
     }
 
     // Read cache from database by reading txMap and txOrder separately
-    async _readCache(addressOrTokenId) {
+    private async _readCache(addressOrTokenId: string): Promise<CacheData | null> {
         try {
-            let txOrder, txMap;
+            let txOrder: string[];
+            let txMap: Record<string, Transaction>;
 
             // Check for paginated txOrder
             let txOrderMeta = await this.db.get(`${addressOrTokenId}:txOrder:meta`);
@@ -180,7 +218,7 @@ class ChronikCache {
     }
     
     // Write cache into database with pagination support if tx count exceeds MAX_ITEMS_PER_KEY
-    async _writeCache(addressOrTokenId, data, isToken = false) {
+    private async _writeCache(addressOrTokenId: string, data: CacheData, isToken: boolean = false): Promise<void> {
         // Use computeHash to generate hash value
         const newHash = computeHash(data.txOrder);
 
@@ -211,7 +249,7 @@ class ChronikCache {
             
             for (let i = 0; i < pageCount; i++) {
                 let chunkKeys = data.txOrder.slice(i * MAX_ITEMS_PER_KEY, (i + 1) * MAX_ITEMS_PER_KEY);
-                let chunkMap = {};
+                let chunkMap: Record<string, Transaction> = {};
                 for (const txid of chunkKeys) {
                     chunkMap[txid] = data.txMap[txid];
                 }
@@ -234,7 +272,7 @@ class ChronikCache {
     }
 
     // 更新全局元数据
-    async _updateGlobalMetadata(identifier, metadata, isToken = false) {
+    private async _updateGlobalMetadata(identifier: string, metadata: CacheMetadata, isToken: boolean = false): Promise<void> {
         const key = isToken ? `token:${identifier}` : `address:${identifier}`;
         await this.db.updateGlobalMetadata(key, metadata);
         // Update in-memory metadata cache with LRU ordering
@@ -246,12 +284,12 @@ class ChronikCache {
     }
 
     // 获取全局元数据
-    async _getGlobalMetadata(identifier, isToken = false) {
+    private async _getGlobalMetadata(identifier: string, isToken: boolean = false): Promise<CacheMetadata | null> {
         const key = isToken ? `token:${identifier}` : `address:${identifier}`;
         // Try to get from in-memory cache
         if (this.globalMetadataCache.has(key)) {
             // Update recency ordering by re-inserting the key
-            const metadata = this.globalMetadataCache.get(key);
+            const metadata = this.globalMetadataCache.get(key)!;
             this.globalMetadataCache.delete(key);
             this.globalMetadataCache.set(key, metadata);
             return metadata;
@@ -267,15 +305,15 @@ class ChronikCache {
 
     /* --------------------- 初始化 WebSocket --------------------- */
 
-    async _initWebsocketForAddress(address) {
+    private async _initWebsocketForAddress(address: string): Promise<void> {
         try {
             return await this.failover.handleWebSocketOperation(async () => {
-                this.wsManager.resetWsTimer(address, { isToken: false }, (addr) => {
+                this.wsManager.resetWsTimer(address, { isToken: false }, (addr: string) => {
                     this._setCacheStatus(addr, CACHE_STATUS.UNKNOWN);
                     this._resetMemoryCache(addr, false);
                 });
 
-                await this.wsManager.initWebsocketForAddress(address, async (addr, txid, msgType) => {
+                await this.wsManager.initWebsocketForAddress(address, async (addr: string, txid: string, msgType: WebSocketMessageType) => {
                     const key = `${addr}:${msgType}`;
                     if (msgType === 'TX_ADDED_TO_MEMPOOL') {
                         this._debounce(key, async () => {
@@ -297,15 +335,15 @@ class ChronikCache {
         }
     }
 
-    async _initWebsocketForToken(tokenId) {
+    private async _initWebsocketForToken(tokenId: string): Promise<void> {
         try {
             return await this.failover.handleWebSocketOperation(async () => {
-                this.wsManager.resetWsTimer(tokenId, { isToken: true }, (id) => {
+                this.wsManager.resetWsTimer(tokenId, { isToken: true }, (id: string) => {
                     this._setCacheStatus(id, CACHE_STATUS.UNKNOWN, true);
                     this._resetMemoryCache(id, true);
                 });
 
-                await this.wsManager.initWebsocketForToken(tokenId, async (id, txid, msgType) => {
+                await this.wsManager.initWebsocketForToken(tokenId, async (id: string, txid: string, msgType: WebSocketMessageType) => {
                     const key = `${id}:${msgType}`;
                     if (msgType === 'TX_ADDED_TO_MEMPOOL') {
                         this._debounce(key, async () => {
@@ -329,7 +367,7 @@ class ChronikCache {
 
     /* --------------------- 缓存状态管理方法 --------------------- */
 
-    _getCacheStatus(identifier, isToken = false) {
+    private _getCacheStatus(identifier: string, isToken: boolean = false): string {
         const isUpdating = this._isUpdating(identifier, isToken);
         if (isUpdating) {
             return CACHE_STATUS.UPDATING;
@@ -340,7 +378,7 @@ class ChronikCache {
         return status?.status ?? CACHE_STATUS.UNKNOWN;
     }
 
-    _setCacheStatus(identifier, status, isToken = false) {
+    private _setCacheStatus(identifier: string, status: string, isToken: boolean = false): void {
         const now = Date.now();
         const targetMap = isToken ? this.tokenStatusMap : this.statusMap;
         const existingStatus = targetMap.get(identifier);
@@ -352,20 +390,20 @@ class ChronikCache {
         `);
         
         targetMap.set(identifier, {
-            status,
+            status: status as any,
             cacheTimestamp: existingStatus?.cacheTimestamp || now
         });
     }
 
     /* --------------------- Core Cache Update Logic --------------------- */
 
-    _isUpdating(identifier, isToken = false) {
+    private _isUpdating(identifier: string, isToken: boolean = false): boolean {
         const updateMap = isToken ? this.tokenUpdateLocks : this.updateLocks;
         return updateMap.has(identifier);
     }
 
     // 修改检查限制的方法名和实现
-    _checkTxLimit(identifier, numTxs, isToken = false) {
+    private _checkTxLimit(identifier: string, numTxs: number, isToken: boolean = false): boolean {
         if (numTxs > this.maxTxLimit) {
             const idType = isToken ? 'Token' : 'Address';
             this.logger.log(`[${idType} ${identifier}] Transaction count (${numTxs}) exceeds maxTxLimit (${this.maxTxLimit}), setting to REJECT status`);
@@ -375,7 +413,7 @@ class ChronikCache {
         return false;
     }
 
-    async _checkAndUpdateCache(address, apiNumTxs, pageSize, forceUpdate = false) {
+    private async _checkAndUpdateCache(address: string, apiNumTxs: number, pageSize: number, forceUpdate: boolean = false): Promise<void> {
         if (this._checkTxLimit(address, apiNumTxs)) {
             return;
         }
@@ -422,7 +460,7 @@ class ChronikCache {
         });
     }
 
-    async _updateCache(address, totalNumTxs, pageSize) {
+    private async _updateCache(address: string, totalNumTxs: number, pageSize: number): Promise<void> {
         return await this.failover.executeWithRetry(async () => {
             try {
                 if (this._checkTxLimit(address, totalNumTxs)) {
@@ -441,13 +479,11 @@ class ChronikCache {
                     
                     if (currentSize >= totalNumTxs) {
                         // Final sorting of txOrder before final cache write using the helper
-                      //  this.logger.startTimer(`[${address}] Final sorting tx order`);
-                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
-                    //    this.logger.endTimer(`[${address}] Final sorting tx order`);
+                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), (key: string) => localTxMap.get(key));
 
                         // Always write the final state into the cache
                         this.logger.startTimer(`[${address}] Final write cache`);
-                        const updatedData = {
+                        const updatedData: CacheData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
@@ -462,23 +498,19 @@ class ChronikCache {
                     const result = await this.chronik.address(address).history(currentPage, pageSize);
                     this.logger.endTimer(`[${address}] Fetch history`);
             
-                  //  this.logger.startTimer(`[${address}] Process tx`);
-                    result.txs.forEach(tx => {
+                    result.txs.forEach((tx: Transaction) => {
                         if (!localTxMap.has(tx.txid)) {
                             localTxMap.set(tx.txid, tx);
                         }
                     });
-                 //   this.logger.endTimer(`[${address}] Process tx`);
             
-                //    this.logger.startTimer(`[${address}] Sorting tx order`);
                     // Use helper function to sort txOrder
-                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
-                //    this.logger.endTimer(`[${address}] Sorting tx order`);
+                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), (key: string) => localTxMap.get(key));
             
                     if (localTxMap.size >= 2000) {
                         if (iterationCount % 10 === 0) {
                             this.logger.startTimer(`[${address}] Write cache`);
-                            const updatedData = {
+                            const updatedData: CacheData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
@@ -489,7 +521,7 @@ class ChronikCache {
                         }
                     } else {
                         this.logger.startTimer(`[${address}] Write cache`);
-                        const updatedData = {
+                        const updatedData: CacheData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
@@ -501,10 +533,9 @@ class ChronikCache {
                     iterationCount++;
                 }
                 
-                // Clean up memory after cache update.
-            //    this.logger.log(`[${address}] Cleaning up memory used for cache update.`);
+                // Clean up memory after cache update
                 localTxMap.clear();
-                localTxOrder = null;
+                localTxOrder = [];
             
                 const currentStatus = this._getCacheStatus(address);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -524,12 +555,12 @@ class ChronikCache {
     /* --------------------- Script Related Methods --------------------- */
 
     // Convert script parameters to ecash address
-    _convertScriptToAddress(type, hash) {
+    private _convertScriptToAddress(type: string, hash: string): string {
         try {
             // Ensure hash is lowercase
             hash = hash.toLowerCase();
             // Use ecashaddrjs to convert script to ecash address
-            const address = encodeCashAddress('ecash', type, hash);
+            const address = encodeCashAddress('ecash', type as any, hash);
             // Cache script to address mapping
             const scriptKey = `${type}:${hash}`;
             this.scriptToAddressMap.set(scriptKey, address);
@@ -541,9 +572,9 @@ class ChronikCache {
     }
 
     // Fluent interface for script method
-    script(type, hash) {
+    public script(type: string, hash: string) {
         return {
-            history: async (pageOffset = 0, pageSize = 200) => {
+            history: async (pageOffset: number = 0, pageSize: number = 200): Promise<HistoryResponse> => {
                 // Convert script to address and use existing address query logic
                 const address = this._convertScriptToAddress(type, hash);
                 return await this.getAddressHistory(address, pageOffset, pageSize);
@@ -555,7 +586,7 @@ class ChronikCache {
     /* --------------------- External Interface Methods --------------------- */
 
     // Clear cache entries for an address by deleting both keys
-    async clearAddressCache(address) {
+    public async clearAddressCache(address: string): Promise<void> {
         await Promise.all([
             this.db.deletePaginated(`${address}:txMap`),
             this.db.deletePaginated(`${address}:txOrder`)
@@ -565,7 +596,7 @@ class ChronikCache {
         this.logger.log(`Cache cleared for address: ${address}`);
     }
 
-    async clearAllCache() {
+    public async clearAllCache(): Promise<void> {
         try {
             // Clear all local cache data (addresses and tokens)
             await this.db.clear();
@@ -586,7 +617,7 @@ class ChronikCache {
         }
     }
 
-    async getAddressHistory(address, pageOffset = 0, pageSize = 200) {
+    public async getAddressHistory(address: string, pageOffset: number = 0, pageSize: number = 200): Promise<HistoryResponse> {
         return await this.failover.executeWithRetry(async () => {
             try {
                 const currentStatus = this._getCacheStatus(address);
@@ -612,9 +643,9 @@ class ChronikCache {
                 
                 const wsTimeInfo = this.wsManager.getRemainingTime(address);
                 if (wsTimeInfo.active) {
-                    // this.logger.log(`[${address}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                    // WebSocket is active
                 } else {
-                    // this.logger.log(`[${address}] ${wsTimeInfo.message}`);
+                    // WebSocket is not active
                     if (currentStatus === CACHE_STATUS.LATEST) {
                         this._initWebsocketForAddress(address);
                     }
@@ -664,8 +695,7 @@ class ChronikCache {
         }, `getAddressHistory for ${address}`);
     }
 
-
-    async _getPageFromCache(address, pageOffset, pageSize) {
+    private async _getPageFromCache(address: string, pageOffset: number, pageSize: number): Promise<HistoryResponse | null> {
         this.logger.startTimer(`[${address}] _getPageFromCache`);
         let cacheEntry = this.addressMemoryCache.get(address);
         const now = Date.now();
@@ -675,7 +705,7 @@ class ChronikCache {
             if (now > cacheEntry.expiry) {
                 this.logger.log(`[${address}] In-memory cache entry expired`);
                 this.addressMemoryCache.delete(address);
-                cacheEntry = null;
+                cacheEntry = undefined;
             } else {
                 // Use memory cache
                 cacheEntry.expiry += 10 * 1000;
@@ -683,14 +713,15 @@ class ChronikCache {
             }
         }
 
-        let cache;
+        let cache: CacheData;
         if (cacheEntry) {
             cache = cacheEntry.data;
         } else {
             this.logger.startTimer(`[${address}] Read persistent cache from DB`);
-            cache = await this._readCache(address);
+            const cacheResult = await this._readCache(address);
             this.logger.endTimer(`[${address}] Read DB cache`);
-            if (!cache) return null;
+            if (!cacheResult) return null;
+            cache = cacheResult;
             // Initial memory cache expiry time: 120 seconds
             this.addressMemoryCache.set(address, {
                 data: cache,
@@ -702,7 +733,7 @@ class ChronikCache {
         if (!metadata) return null;
 
         // Ensure txOrder is sorted
-        cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
+        cache.txOrder = sortTxIds(cache.txOrder, (key: string) => cache.txMap[key]);
 
         // With 50% probability, compute hash and check consistency
         if (Math.random() < 0.5) {
@@ -711,7 +742,7 @@ class ChronikCache {
             if (newHash !== metadata.dataHash) {
                 this.logger.log(`[${address}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
                 this.logger.log(`[${address}] Cache order hash mismatch detected. Triggering cache update and invalidating in-memory cache.`);
-                this._checkAndUpdateCache(address, metadata.numTxs, this.defaultPageSize, true);
+                this._checkAndUpdateCache(address, metadata.numTxs!, this.defaultPageSize, true);
                 // Invalidate the in-memory cache since data is stale
                 this._resetMemoryCache(address, false);
             }
@@ -719,21 +750,24 @@ class ChronikCache {
 
         const start = pageOffset * pageSize;
         const end = start + pageSize;
-        const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
+        let txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
         await this._updatePageUnconfirmedTxs(address, cache, txs, false);
+
+        // 重新获取可能已更新的交易数据
+        txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
         this.logger.endTimer(`[${address}] _getPageFromCache`);
         return {
             txs,
-            numPages: Math.ceil(metadata.numTxs / pageSize),
-            numTxs: metadata.numTxs
+            numPages: Math.ceil(metadata.numTxs! / pageSize),
+            numTxs: metadata.numTxs!
         };
     }
 
-    address(address) {
+    public address(address: string) {
         return {
-            history: async (pageOffset = 0, pageSize = 200) => {
+            history: async (pageOffset: number = 0, pageSize: number = 200): Promise<HistoryResponse> => {
                 return await this.getAddressHistory(address, pageOffset, pageSize);
             }
             // Add other methods here if needed
@@ -742,8 +776,7 @@ class ChronikCache {
 
     /* --------------------- Token Related Methods --------------------- */
 
-
-    async _checkAndUpdateTokenCache(tokenId, apiNumTxs, pageSize, forceUpdate = false) {
+    private async _checkAndUpdateTokenCache(tokenId: string, apiNumTxs: number, pageSize: number, forceUpdate: boolean = false): Promise<void> {
         if (this._checkTxLimit(tokenId, apiNumTxs, true)) {
             return;
         }
@@ -793,7 +826,7 @@ class ChronikCache {
         });
     }
 
-    async _updateTokenCache(tokenId, totalNumTxs, pageSize) {
+    private async _updateTokenCache(tokenId: string, totalNumTxs: number, pageSize: number): Promise<void> {
         return await this.failover.executeWithRetry(async () => {
             try {
                 if (this._checkTxLimit(tokenId, totalNumTxs, true)) {
@@ -813,13 +846,11 @@ class ChronikCache {
         
                     if (currentSize >= totalNumTxs) {
                         // Re-sort the txOrder before final cache write
-                      //  this.logger.startTimer(`[${tokenId}] Final sorting tx order`);
-                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
-                  //      this.logger.endTimer(`[${tokenId}] Final sorting tx order`);
+                        localTxOrder = sortTxIds(Array.from(localTxMap.keys()), (key: string) => localTxMap.get(key));
                         
                         // Always write the final state into the cache
                         this.logger.startTimer(`[${tokenId}] Final write cache`);
-                        const updatedData = {
+                        const updatedData: CacheData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
@@ -834,22 +865,18 @@ class ChronikCache {
                     const result = await this.chronik.tokenId(tokenId).history(currentPage, pageSize);
                     this.logger.endTimer(`[${tokenId}] Fetch history`);
         
-                //    this.logger.startTimer(`[${tokenId}] Process tx`);
-                    result.txs.forEach(tx => {
+                    result.txs.forEach((tx: Transaction) => {
                         if (!localTxMap.has(tx.txid)) {
                             localTxMap.set(tx.txid, tx);
                         }
                     });
-              //      this.logger.endTimer(`[${tokenId}] Process tx`);
         
-               //     this.logger.startTimer(`[${tokenId}] Sorting tx order`);
-                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), key => localTxMap.get(key));
-               //     this.logger.endTimer(`[${tokenId}] Sorting tx order`);
+                    localTxOrder = sortTxIds(Array.from(localTxMap.keys()), (key: string) => localTxMap.get(key));
         
                     if (localTxMap.size >= 2000) {
                         if (iterationCount % 10 === 0) {
                             this.logger.startTimer(`[${tokenId}] Write cache`);
-                            const updatedData = {
+                            const updatedData: CacheData = {
                                 txMap: Object.fromEntries(localTxMap),
                                 txOrder: localTxOrder,
                             };
@@ -860,7 +887,7 @@ class ChronikCache {
                         }
                     } else {
                         this.logger.startTimer(`[${tokenId}] Write cache`);
-                        const updatedData = {
+                        const updatedData: CacheData = {
                             txMap: Object.fromEntries(localTxMap),
                             txOrder: localTxOrder,
                         };
@@ -873,9 +900,8 @@ class ChronikCache {
                 }
         
                 // 主动释放内存
-               // this.logger.log(`[${tokenId}] Cleaning up memory used for cache update.`);
                 localTxMap.clear();
-                localTxOrder = null;
+                localTxOrder = [];
         
                 const currentStatus = this._getCacheStatus(tokenId, true);
                 if (currentStatus !== CACHE_STATUS.LATEST) {
@@ -894,11 +920,9 @@ class ChronikCache {
         }, `updateTokenCache for ${tokenId}`);
     }
 
-    async getTokenHistory(tokenId, pageOffset = 0, pageSize = 200) {
-      // this.logger.log('[DEBUG] getTokenHistory called with:', { tokenId, pageOffset, pageSize });
+    public async getTokenHistory(tokenId: string, pageOffset: number = 0, pageSize: number = 200): Promise<HistoryResponse> {
         const apiPageSize = Math.min(200, pageSize);
         const cachePageSize = Math.min(15000, pageSize);
-       // this.logger.log('[DEBUG] getTokenHistory - computed:', { apiPageSize, cachePageSize });
         return await this.failover.executeWithRetry(async () => {
             try {
                 const currentStatus = this._getCacheStatus(tokenId, true);
@@ -921,9 +945,9 @@ class ChronikCache {
                 // 检查 WebSocket 定时器状态
                 const wsTimeInfo = this.wsManager.getRemainingTime(tokenId);
                 if (wsTimeInfo.active) {
-                    // this.logger.log(`[Token ${tokenId}] WebSocket remaining time: ${wsTimeInfo.remainingSec} seconds`);
+                    // WebSocket is active
                 } else {
-                    // this.logger.log(`[Token ${tokenId}] ${wsTimeInfo.message}`);
+                    // WebSocket is not active
                     if (currentStatus === CACHE_STATUS.LATEST) {
                         this._initWebsocketForToken(tokenId).catch(err => this.logger.error(err));
                     }
@@ -970,18 +994,18 @@ class ChronikCache {
         }, `getTokenHistory for ${tokenId}`);
     }
 
-    tokenId(tokenId) {
+    public tokenId(tokenId: string) {
         return {
-            history: async (pageOffset = 0, pageSize = 200) => {
+            history: async (pageOffset: number = 0, pageSize: number = 200): Promise<HistoryResponse> => {
                 return await this.getTokenHistory(tokenId, pageOffset, pageSize);
             }
         };
     }
 
     // 修改 _quickGetTxCount 方法，添加重试机制
-    async _quickGetTxCount(identifier, type = 'address') {
+    private async _quickGetTxCount(identifier: string, type: 'address' | 'token' = 'address'): Promise<number> {
         return await this.failover.executeWithRetry(async () => {
-            let result;
+            let result: HistoryResponse;
             if (type === 'address') {
                 result = await this.chronik.address(identifier).history(0, 1);
             } else if (type === 'token') {
@@ -994,7 +1018,7 @@ class ChronikCache {
     }
 
     // For token cache clear, rely on dbUtils.clearTokenCache (see below)
-    async clearTokenCache(tokenId) {
+    public async clearTokenCache(tokenId: string): Promise<void> {
         await this.db.clearTokenCache(tokenId);
         if (typeof this.wsManager.unsubscribeToken === 'function') {
             this.wsManager.unsubscribeToken(tokenId);
@@ -1004,7 +1028,7 @@ class ChronikCache {
     }
 
     // 修改 _updateUnconfirmedTx 方法，使其接受 addressOrTokenId 参数
-    async _updateUnconfirmedTx(addressOrTokenId, txid) {
+    private async _updateUnconfirmedTx(addressOrTokenId: string, txid: string): Promise<void> {
         return this.txUpdateQueue.enqueue(async () => {
             try {
                 const updatedTx = await this.chronik.tx(txid);
@@ -1015,7 +1039,7 @@ class ChronikCache {
                 }
                 if (cache.txMap[txid]) {
                     cache.txMap[txid] = updatedTx;
-                    cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
+                    cache.txOrder = sortTxIds(cache.txOrder, (key: string) => cache.txMap[key]);
                     await this._writeCache(addressOrTokenId, cache);
                     this.logger.log(`[${addressOrTokenId}] Updated tx ${txid} in cache`);
                 }
@@ -1027,41 +1051,47 @@ class ChronikCache {
     }
 
     // 合并后的通用方法
-    async _updatePageUnconfirmedTxs(identifier, cache, txsInCurrentPage, isToken = false) {
+    private async _updatePageUnconfirmedTxs(identifier: string, cache: CacheData, txsInCurrentPage: Transaction[], isToken: boolean = false): Promise<void> {
         const idType = isToken ? 'token' : 'address';
         let updated = false;
 
+        // 筛选未确认交易（没有block.height字段的交易）
         const unconfirmedTxids = txsInCurrentPage
             .filter(tx => !tx.block || !tx.block.height)
             .map(tx => tx.txid);
 
-        // 使用 Promise.all 和任务队列处理所有未确认交易
+        if (unconfirmedTxids.length === 0) {
+            return; // 没有未确认交易，直接返回
+        }
+
+        this.logger.log(`[${idType} ${identifier}] Found ${unconfirmedTxids.length} unconfirmed transactions to check`);
+
+        // 处理所有未确认交易
         await Promise.all(unconfirmedTxids.map(txid => 
             this.txUpdateQueue.enqueue(async () => {
                 try {
                     const updatedTx = await this.chronik.tx(txid);
+                    // 检查交易是否已确认（有block.height字段）
                     if (updatedTx && updatedTx.block && updatedTx.block.height) {
                         cache.txMap[txid] = updatedTx;
                         updated = true;
+                        this.logger.log(`[${idType} ${identifier}] Tx ${txid} confirmed at height ${updatedTx.block.height}`);
                     }
                 } catch (error) {
                     this.logger.error(`Error updating tx ${txid} in cache:`, error);
                 }
             })
-        )).then(() => {
-            if (updated) {
-                this.logger.log(`[${idType} ${identifier}] Updated some unconfirmed transactions`);
-            }
-        });
+        ));
 
         if (updated) {
-            cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
+            cache.txOrder = sortTxIds(cache.txOrder, (key: string) => cache.txMap[key]);
             await this._writeCache(identifier, cache, isToken);
+            this.logger.log(`[${idType} ${identifier}] Cache updated with newly confirmed transactions`);
         }
     }
 
     // 修改 token 的 getPageFromCache 方法
-    async _getTokenPageFromCache(tokenId, pageOffset, pageSize) {
+    private async _getTokenPageFromCache(tokenId: string, pageOffset: number, pageSize: number): Promise<HistoryResponse | null> {
         this.logger.startTimer(`[${tokenId}] _getTokenPageFromCache`);
         let cacheEntry = this.tokenMemoryCache.get(tokenId);
         const now = Date.now();
@@ -1070,7 +1100,7 @@ class ChronikCache {
             if (now > cacheEntry.expiry) {
                 this.logger.log(`[${tokenId}] In-memory token cache entry expired`);
                 this.tokenMemoryCache.delete(tokenId);
-                cacheEntry = null;
+                cacheEntry = undefined;
             } else {
                 // Use memory cache
                 cacheEntry.expiry += 10 * 1000;
@@ -1078,14 +1108,15 @@ class ChronikCache {
             }
         }
 
-        let cache;
+        let cache: CacheData;
         if (cacheEntry) {
             cache = cacheEntry.data;
         } else {
             this.logger.startTimer(`[${tokenId}] Read persistent cache from DB`);
-            cache = await this._readCache(tokenId);
+            const cacheResult = await this._readCache(tokenId);
             this.logger.endTimer(`[${tokenId}] Read DB cache`);
-            if (!cache) return null;
+            if (!cacheResult) return null;
+            cache = cacheResult;
             // Initial memory cache expiry time: 120 seconds
             this.tokenMemoryCache.set(tokenId, {
                 data: cache,
@@ -1096,7 +1127,7 @@ class ChronikCache {
         const metadata = await this._getGlobalMetadata(tokenId, true);
         if (!metadata) return null;
 
-        cache.txOrder = sortTxIds(cache.txOrder, key => cache.txMap[key]);
+        cache.txOrder = sortTxIds(cache.txOrder, (key: string) => cache.txMap[key]);
 
         // With 50% probability, compute hash and check consistency
         if (Math.random() < 0.5) {
@@ -1105,7 +1136,7 @@ class ChronikCache {
             if (newHash !== metadata.dataHash) {
                 this.logger.log(`[${tokenId}] newHash: ${newHash}, stored hash: ${metadata.dataHash}`);
                 this.logger.log(`[${tokenId}] Cache order hash mismatch detected. Triggering cache update and invalidating in-memory cache.`);
-                this._checkAndUpdateTokenCache(tokenId, metadata.numTxs, this.defaultPageSize, true);
+                this._checkAndUpdateTokenCache(tokenId, metadata.numTxs!, this.defaultPageSize, true);
                 // Invalidate the in-memory cache since data is stale
                 this._resetMemoryCache(tokenId, true);
             }
@@ -1113,19 +1144,22 @@ class ChronikCache {
 
         const start = pageOffset * pageSize;
         const end = start + pageSize;
-        const txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
+        let txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
         await this._updatePageUnconfirmedTxs(tokenId, cache, txs, true);
+
+        // 重新获取可能已更新的交易数据
+        txs = cache.txOrder.slice(start, end).map(txid => cache.txMap[txid]);
 
         this.logger.endTimer(`[${tokenId}] _getTokenPageFromCache`);
         return {
             txs,
-            numPages: Math.ceil(metadata.numTxs / pageSize),
-            numTxs: metadata.numTxs
+            numPages: Math.ceil(metadata.numTxs! / pageSize),
+            numTxs: metadata.numTxs!
         };
     }
 
-    _maintainGlobalMetadataCacheLimit() {
+    private _maintainGlobalMetadataCacheLimit(): void {
         while (this.globalMetadataCache.size > this.globalMetadataCacheLimit) {
             const oldestKey = this.globalMetadataCache.keys().next().value;
             this.globalMetadataCache.delete(oldestKey);
@@ -1134,7 +1168,7 @@ class ChronikCache {
     }
 
     // 新增公共方法 getCacheStatus, 方便用户直接查询缓存状态
-    getCacheStatus(identifier, isToken = false) {
+    public getCacheStatus(identifier: string, isToken: boolean = false): string {
         if (isToken) {
             return this._getCacheStatus(identifier, true);
         }
@@ -1142,11 +1176,11 @@ class ChronikCache {
     }
 
     // Add a method to get statistics
-    async getStatistics() {
+    public async getStatistics(): Promise<CacheStatistics> {
         return await this.stats.getStatistics();
     }
 
-    _resetMemoryCache(identifier, isToken = false) {
+    private _resetMemoryCache(identifier: string, isToken: boolean = false): void {
         // Clear the in-memory cache for the given identifier
         if (isToken) {
             this.tokenMemoryCache.delete(identifier);
@@ -1158,17 +1192,20 @@ class ChronikCache {
     // 在内存缓存中，为每个条目都维护一个独立的过期时间（初始120秒）。
     // 每访问一次该条目，就将过期时间增加10秒。
     // 后台定时检查过期条目，将其移除。
-    _startMemoryCacheExpirationCheckTimer() {
+    private _startMemoryCacheExpirationCheckTimer(): void {
         // 每隔10秒检查一次是否有过期条目
         const checkInterval = 10 * 1000;
-        setTimeout(() => {
+        
+        const cleanupInterval = setInterval(() => {
             const now = Date.now();
+            let addressCacheCleared = 0;
+            let tokenCacheCleared = 0;
 
             // 检查 addressMemoryCache
             for (const [key, entry] of this.addressMemoryCache.entries()) {
                 if (now > entry.expiry) {
-                    // 过期则删除
                     this.addressMemoryCache.delete(key);
+                    addressCacheCleared++;
                 }
             }
 
@@ -1176,12 +1213,32 @@ class ChronikCache {
             for (const [key, entry] of this.tokenMemoryCache.entries()) {
                 if (now > entry.expiry) {
                     this.tokenMemoryCache.delete(key);
+                    tokenCacheCleared++;
                 }
             }
 
-            this._startMemoryCacheExpirationCheckTimer();
+            // 只在清理了缓存时记录日志
+            if (addressCacheCleared > 0 || tokenCacheCleared > 0) {
+                this.logger.log(`Memory cache cleanup: ${addressCacheCleared} address entries, ${tokenCacheCleared} token entries cleared`);
+            }
         }, checkInterval);
+
+        // 保存定时器引用以便将来可以清理
+        this.memoryCacheCleanupInterval = cleanupInterval;
+    }
+
+    // 添加清理方法，用于停止内存缓存相关的定时器
+    public destroy(): void {
+        if (this.memoryCacheCleanupInterval) {
+            clearInterval(this.memoryCacheCleanupInterval);
+        }
+        
+        // 清理防抖计时器
+        for (const timer of this.debounceTimers.values()) {
+            clearTimeout(timer);
+        }
+        this.debounceTimers.clear();
     }
 }
 
-module.exports = ChronikCache; 
+export = ChronikCache; 
