@@ -6,6 +6,57 @@ import { Level } from 'level';
 import FailoverHandler from './failover';
 import Logger from './Logger';
 
+const BIGINT_TAG = '__chronikCacheBigint__';
+
+function serializeValue(value: any): any {
+    if (typeof value === 'bigint') {
+        return { [BIGINT_TAG]: value.toString() };
+    }
+
+    if (Array.isArray(value)) {
+        return value.map(serializeValue);
+    }
+
+    if (value !== null && typeof value === 'object') {
+        const serialized: Record<string, any> = {};
+        for (const [key, nestedValue] of Object.entries(value)) {
+            serialized[key] = serializeValue(nestedValue);
+        }
+        return serialized;
+    }
+
+    return value;
+}
+
+function deserializeValue(value: any): any {
+    if (Array.isArray(value)) {
+        return value.map(deserializeValue);
+    }
+
+    if (value !== null && typeof value === 'object') {
+        const keys = Object.keys(value);
+        if (
+            keys.length === 1 &&
+            keys[0] === BIGINT_TAG &&
+            typeof value[BIGINT_TAG] === 'string'
+        ) {
+            return BigInt(value[BIGINT_TAG]);
+        }
+
+        const deserialized: Record<string, any> = {};
+        for (const [key, nestedValue] of Object.entries(value)) {
+            deserialized[key] = deserializeValue(nestedValue);
+        }
+        return deserialized;
+    }
+
+    return value;
+}
+
+function getSerializedSize(value: any): number {
+    return Buffer.byteLength(JSON.stringify(serializeValue(value)), 'utf8');
+}
+
 interface DbUtilsOptions {
     valueEncoding?: string;
     maxCacheSize?: number;
@@ -39,8 +90,8 @@ export default class DbUtils {
         this.db = new Level(cacheDir, { 
             valueEncoding: {
                 format: 'utf8',
-                encode: (obj: any) => JSON.stringify(obj, (_k, v) => typeof v === 'bigint' ? v.toString() : v),
-                decode: (str: string) => JSON.parse(str, (_k, v) => typeof v === 'string' && /^\d{16,}$/.test(v) ? BigInt(v) : v)
+                encode: (obj: any) => JSON.stringify(serializeValue(obj)),
+                decode: (str: string) => deserializeValue(JSON.parse(str)),
             }
         });
         this.maxCacheSize = maxCacheSize;
@@ -56,7 +107,8 @@ export default class DbUtils {
         return await this.failover.handleDbOperation(
             async () => {
                 try {
-                    return await this.db.get(key);
+                    const value = await this.db.get(key);
+                    return typeof value === 'undefined' ? defaultValue : value;
                 } catch (error: any) {
                     if (error.notFound) {
                         return defaultValue;
@@ -102,7 +154,7 @@ export default class DbUtils {
                 for await (const [key, value] of this.db.iterator()) {
                     // 同时计算key和value的字节大小
                     totalSize += Buffer.byteLength(key, 'utf8');
-                    totalSize += Buffer.byteLength(JSON.stringify(value), 'utf8');
+                    totalSize += getSerializedSize(value);
                 }
                 return totalSize;
             },
@@ -147,7 +199,7 @@ export default class DbUtils {
 
             const entries: CacheEntry[] = [];
             for await (const [key, value] of this.db.iterator()) {
-                const size = Buffer.byteLength(JSON.stringify(value), 'utf8');
+                const size = getSerializedSize(value);
 
                 // 获取全局元数据中的访问计数
                 const metadata = await this.getGlobalMetadata(key);
@@ -257,7 +309,8 @@ export default class DbUtils {
         return await this.failover.handleDbOperation(
             async () => {
                 try {
-                    return await this.db.get(`metadata:${key}`);
+                    const value = await this.db.get(`metadata:${key}`);
+                    return typeof value === 'undefined' ? defaultValue : value;
                 } catch (error: any) {
                     if (error.notFound) {
                         return defaultValue;
